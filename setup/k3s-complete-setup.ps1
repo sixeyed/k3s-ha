@@ -161,8 +161,7 @@ K3S_TOKEN=$3
 K3S_VERSION=$4
 STORAGE_DEVICE=$5
 NFS_MOUNT_PATH=$6
-TLS_SANS="$7"
-DISABLE_SERVICES="$8"
+K3S_SERVER_ARGS="$7"
 
 echo "Setting up K3s Master Node $MASTER_NUMBER"
 
@@ -226,20 +225,12 @@ exportfs -ra
 # Install K3s
 if [ "$MASTER_NUMBER" -eq 1 ]; then
     echo "Installing first K3s master"
-    curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION=$K3S_VERSION sh -s - server \
-        --cluster-init \
-        --token=$K3S_TOKEN \
-        $TLS_SANS \
-        $DISABLE_SERVICES \
-        --write-kubeconfig-mode=644
+    echo "K3s args: $K3S_SERVER_ARGS"
+    eval "curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION=$K3S_VERSION sh -s - server $K3S_SERVER_ARGS"
 else
     echo "Installing additional K3s master"
-    curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION=$K3S_VERSION sh -s - server \
-        --server https://${FIRST_MASTER_IP}:6443 \
-        --token=$K3S_TOKEN \
-        $TLS_SANS \
-        $DISABLE_SERVICES \
-        --write-kubeconfig-mode=644
+    echo "K3s args: --server https://${FIRST_MASTER_IP}:6443 $K3S_SERVER_ARGS"
+    eval "curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION=$K3S_VERSION sh -s - server --server https://${FIRST_MASTER_IP}:6443 $K3S_SERVER_ARGS"
 fi
 
 echo "Master setup complete!"
@@ -256,6 +247,7 @@ $WorkerSetupScript = @'
 PROXY_IP=$1
 K3S_TOKEN=$2
 K3S_VERSION=$3
+K3S_AGENT_ARGS="$4"
 
 echo "Setting up K3s Worker Node"
 
@@ -283,9 +275,8 @@ swapoff -a
 sed -i '/ swap / s/^\(.*\)$/#\1/g' /etc/fstab
 
 # Install K3s agent
-curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION=$K3S_VERSION sh -s - agent \
-    --server https://${PROXY_IP}:6443 \
-    --token=$K3S_TOKEN
+echo "K3s agent args: $K3S_AGENT_ARGS"
+eval "curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION=$K3S_VERSION sh -s - agent $K3S_AGENT_ARGS"
 
 echo "Worker setup complete!"
 '@
@@ -489,31 +480,27 @@ function Setup-ProxyNode {
 function Setup-MasterNodes {
     Write-Host "`n=== Setting up Master Nodes ===" -ForegroundColor Green
     
-    # Build TLS SAN arguments
-    $tlsSanArgs = ""
-    foreach ($san in $Config.TLSSans) {
-        $tlsSanArgs += "--tls-san=$san "
-    }
-    $tlsSanArgs = $tlsSanArgs.Trim()
-    
-    # Build disable service arguments
-    $disableArgs = ""
-    foreach ($service in $Config.DisableServices) {
-        $disableArgs += "--disable=$service "
-    }
-    $disableArgs = $disableArgs.Trim()
-    
     for ($i = 0; $i -lt $Config.MasterIPs.Count; $i++) {
         $masterIP = $Config.MasterIPs[$i]
         $masterNumber = $i + 1
+        $isFirstServer = $i -eq 0
         
         Write-Host "`nSetting up Master $masterNumber ($masterIP)..." -ForegroundColor Yellow
+        
+        # Generate K3s server arguments using the module function
+        $k3sServerArgs = Get-K3sServerArgs -Config $Config -IsFirstServer:$isFirstServer
+        if (-not $isFirstServer) {
+            # Remove cluster-init for additional servers (it's handled in the script)
+            $k3sServerArgs = $k3sServerArgs -replace "--cluster-init\s*", ""
+        }
+        
+        Write-Host "  K3s server arguments: $k3sServerArgs" -ForegroundColor Cyan
         
         # Copy setup script
         Copy-FileToNode -Config $Config -Node $masterIP -LocalPath "setup-master.sh" -RemotePath "/tmp/setup-master.sh"
         
         # Execute setup script
-        $setupCmd = "chmod +x /tmp/setup-master.sh && sudo /tmp/setup-master.sh $masterNumber $($Config.MasterIPs[0]) $($Config.K3sToken) $($Config.K3sVersion) $($Config.StorageDevice) $($Config.NFSMountPath) `"$tlsSanArgs`" `"$disableArgs`""
+        $setupCmd = "chmod +x /tmp/setup-master.sh && sudo /tmp/setup-master.sh $masterNumber $($Config.MasterIPs[0]) $($Config.K3sToken) $($Config.K3sVersion) $($Config.StorageDevice) $($Config.NFSMountPath) `"$k3sServerArgs`""
         Invoke-SSHCommand -Config $Config -Node $masterIP -Command $setupCmd
         
         if ($i -eq 0) {
@@ -531,6 +518,11 @@ function Setup-MasterNodes {
 function Setup-WorkerNodes {
     Write-Host "`n=== Setting up Worker Nodes ===" -ForegroundColor Green
     
+    # Generate K3s agent arguments using the module function
+    $serverURL = "https://$($Config.ProxyIP):6443"
+    $k3sAgentArgs = Get-K3sAgentArgs -Config $Config -ServerURL $serverURL
+    Write-Host "  K3s agent arguments: $k3sAgentArgs" -ForegroundColor Cyan
+    
     foreach ($workerIP in $Config.WorkerIPs) {
         Write-Host "`nSetting up Worker ($workerIP)..." -ForegroundColor Yellow
         
@@ -538,7 +530,7 @@ function Setup-WorkerNodes {
         Copy-FileToNode -Config $Config -Node $workerIP -LocalPath "setup-worker.sh" -RemotePath "/tmp/setup-worker.sh"
         
         # Execute setup script
-        $setupCmd = "chmod +x /tmp/setup-worker.sh && sudo /tmp/setup-worker.sh $($Config.ProxyIP) $($Config.K3sToken) $($Config.K3sVersion)"
+        $setupCmd = "chmod +x /tmp/setup-worker.sh && sudo /tmp/setup-worker.sh $($Config.ProxyIP) $($Config.K3sToken) $($Config.K3sVersion) `"$k3sAgentArgs`""
         Invoke-SSHCommand -Config $Config -Node $workerIP -Command $setupCmd
         
         Start-Sleep -Seconds 10

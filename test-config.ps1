@@ -17,7 +17,7 @@ try {
     
     # Verify configuration structure
     Write-Host "`nConfiguration validation:" -ForegroundColor Yellow
-    $requiredKeys = @('ProxyIP', 'MasterIPs', 'WorkerIPs', 'SSHUser', 'SSHKeyPath', 'K3sVersion')
+    $requiredKeys = @('ProxyIP', 'MasterIPs', 'WorkerIPs', 'SSHUser', 'SSHKeyPath', 'K3sVersion', 'ServiceCIDR', 'ClusterCIDR')
     foreach ($key in $requiredKeys) {
         if ($Config.$key) {
             Write-Host "  ✓ $key : $($Config.$key)" -ForegroundColor Green
@@ -50,6 +50,21 @@ try {
     Write-Host "  Masters: $($Config.MasterIPs -join ', ')" -ForegroundColor White
     Write-Host "  Workers: $($Config.WorkerIPs -join ', ')" -ForegroundColor White
     Write-Host "  Storage: $($Config.StorageDevice) -> $($Config.NFSMountPath)" -ForegroundColor White
+    
+    Write-Host "`nKubernetes Network Configuration:" -ForegroundColor Yellow
+    Write-Host "  Service CIDR: $($Config.ServiceCIDR)" -ForegroundColor White
+    Write-Host "  Cluster CIDR: $($Config.ClusterCIDR)" -ForegroundColor White
+    Write-Host "  Cluster DNS: $($Config.ClusterDNS)" -ForegroundColor White
+    Write-Host "  Cluster Domain: $($Config.ClusterDomain)" -ForegroundColor White
+    Write-Host "  NodePort Range: $($Config.NodePortRange)" -ForegroundColor White
+    Write-Host "  Max Pods per Node: $($Config.MaxPods)" -ForegroundColor White
+    
+    # Test K3s argument generation
+    Write-Host "`nTesting K3s argument generation:" -ForegroundColor Yellow
+    $serverArgs = Get-K3sServerArgs -Config $Config -IsFirstServer
+    Write-Host "  First Server Args: $serverArgs" -ForegroundColor Cyan
+    $agentArgs = Get-K3sAgentArgs -Config $Config -ServerURL "https://$($Config.ProxyIP):6443"
+    Write-Host "  Agent Args: $agentArgs" -ForegroundColor Cyan
     
 } catch {
     Write-Host "✗ Configuration test failed: $($_.Exception.Message)" -ForegroundColor Red

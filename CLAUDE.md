@@ -8,16 +8,25 @@ This is a PowerShell-based Infrastructure-as-Code solution for deploying and man
 
 ## Architecture
 
-The cluster consists of:
+The cluster is highly configurable and supports various deployment sizes:
+
+**Production HA Setup (recommended):**
 - **1 Nginx Proxy VM** (10.0.1.100) - Load balances API traffic to masters
 - **3 Control Plane Nodes** (10.0.1.10-12) - Masters with integrated NFS storage
 - **6 Worker Nodes** (10.0.1.20-25) - Application workload nodes
 
+**Minimal Test Setup:**
+- **1 Nginx Proxy VM** - Load balancer
+- **1 Control Plane Node** - Single master with NFS storage  
+- **1 Worker Node** - Application workload node
+
 Key architectural decisions:
-- No virtual IP dependency - uses Nginx for HA instead
-- NFS storage runs on master nodes for persistent volumes
-- All communication secured with TLS
-- Supports scaling up to 100 worker nodes
+- **Flexible scaling** - Deploy 1+1+1 for testing or 1+3+N for production
+- **No virtual IP dependency** - uses Nginx for HA instead
+- **Integrated NFS storage** - runs on master nodes for persistent volumes
+- **Full Kubernetes networking control** - configurable CIDRs, DNS, pod limits
+- **All communication secured with TLS**
+- **Supports scaling** up to 100+ worker nodes
 
 ## Key Commands
 
@@ -36,6 +45,16 @@ Key architectural decisions:
 # Option 4: Deploy masters only
 # Option 5: Deploy workers only
 # Option 6: Configure cluster only
+```
+
+### Configuration Testing & Validation
+```powershell
+# Test configuration file validity
+./test-config.ps1
+./test-config.ps1 -ConfigFile "production-cluster.json"
+
+# Deploy minimal test cluster (1 proxy + 1 master + 1 worker)
+./setup/k3s-complete-setup.ps1 -ConfigFile "test-cluster.json"
 ```
 
 ### Day 2 Operations
@@ -122,6 +141,14 @@ All configuration is centralized in JSON files, with `cluster.json` as the defau
     "masterIPs": ["10.0.1.10", "10.0.1.11", "10.0.1.12"],
     "workerIPs": ["10.0.1.20", "10.0.1.21", "10.0.1.22", "10.0.1.23", "10.0.1.24", "10.0.1.25"]
   },
+  "kubernetes": {
+    "serviceCIDR": "10.43.0.0/16",
+    "clusterCIDR": "10.42.0.0/16", 
+    "clusterDNS": "10.43.0.10",
+    "clusterDomain": "cluster.local",
+    "nodePortRange": "30000-32767",
+    "maxPods": 110
+  },
   "storage": {
     "device": "/dev/sdb",
     "nfsMountPath": "/data/nfs"
@@ -133,7 +160,11 @@ All configuration is centralized in JSON files, with `cluster.json` as the defau
   "k3s": {
     "token": null,
     "disableServices": ["traefik"],
-    "tlsSans": []
+    "tlsSans": [],
+    "extraArgs": {
+      "server": [],
+      "agent": []
+    }
   },
   "operations": {
     "drainTimeout": 300,
@@ -145,10 +176,12 @@ All configuration is centralized in JSON files, with `cluster.json` as the defau
 
 **Configuration Features:**
 - **Centralized Configuration**: Single JSON file for all cluster settings
+- **Kubernetes Networking**: Full control over pod/service CIDRs, DNS, and networking
 - **Environment-Specific**: Support for multiple configuration files (staging, production, etc.)
 - **Auto-Generation**: TLS SANs and tokens auto-populate if not specified
 - **Path Expansion**: SSH key paths support `~` expansion
 - **Validation**: Configuration loading includes error handling and validation
+- **Extensible**: Add custom K3s arguments for servers and agents
 
 **Multiple Environments:**
 - Create separate config files: `staging-cluster.json`, `production-cluster.json`
@@ -191,7 +224,18 @@ $Config = Load-ClusterConfig -ConfigPath $ConfigFile
 Invoke-SSHCommand -Config $Config -Node $nodeIP -Command $command
 Copy-FileToNode -Config $Config -Node $nodeIP -LocalPath $file -RemotePath $path
 Copy-FileFromNode -Config $Config -Node $nodeIP -RemotePath $remotePath -LocalPath $file
+
+# Generate K3s arguments based on configuration
+$serverArgs = Get-K3sServerArgs -Config $Config -IsFirstServer
+$agentArgs = Get-K3sAgentArgs -Config $Config -ServerURL "https://proxy:6443"
 ```
+
+**Available Module Functions:**
+- `Load-ClusterConfig` - Load and validate JSON configuration
+- `Invoke-SSHCommand` - Execute commands on remote nodes  
+- `Copy-FileToNode` / `Copy-FileFromNode` - Transfer files via SCP
+- `Get-K3sServerArgs` - Generate server arguments with networking settings
+- `Get-K3sAgentArgs` - Generate agent arguments with pod limits
 
 ## Prerequisites
 

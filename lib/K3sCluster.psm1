@@ -47,6 +47,18 @@ function Load-ClusterConfig {
             TLSSans = $tlsSans
             DisableServices = $jsonContent.k3s.disableServices
             
+            # Kubernetes configuration
+            ServiceCIDR = $jsonContent.kubernetes.serviceCIDR
+            ClusterCIDR = $jsonContent.kubernetes.clusterCIDR
+            ClusterDNS = $jsonContent.kubernetes.clusterDNS
+            ClusterDomain = $jsonContent.kubernetes.clusterDomain
+            NodePortRange = $jsonContent.kubernetes.nodePortRange
+            MaxPods = $jsonContent.kubernetes.maxPods
+            
+            # K3s extra arguments
+            ExtraServerArgs = $jsonContent.k3s.extraArgs.server
+            ExtraAgentArgs = $jsonContent.k3s.extraArgs.agent
+            
             # Storage configuration
             StorageDevice = $jsonContent.storage.device
             NFSMountPath = $jsonContent.storage.nfsMountPath
@@ -124,5 +136,91 @@ function Invoke-SSHCommand {
     Get-SSHCommand -Config $Config -Node $Node -Command $Command
 }
 
+# Function to build K3s server arguments based on configuration
+function Get-K3sServerArgs {
+    param(
+        [Parameter(Mandatory=$true)]
+        [hashtable]$Config,
+        [Parameter(Mandatory=$false)]
+        [switch]$IsFirstServer
+    )
+    
+    $args = @()
+    
+    # Kubernetes networking arguments
+    if ($Config.ServiceCIDR) {
+        $args += "--service-cidr=$($Config.ServiceCIDR)"
+    }
+    if ($Config.ClusterCIDR) {
+        $args += "--cluster-cidr=$($Config.ClusterCIDR)"
+    }
+    if ($Config.ClusterDNS) {
+        $args += "--cluster-dns=$($Config.ClusterDNS)"
+    }
+    if ($Config.ClusterDomain) {
+        $args += "--cluster-domain=$($Config.ClusterDomain)"
+    }
+    if ($Config.NodePortRange) {
+        $args += "--service-node-port-range=$($Config.NodePortRange)"
+    }
+    if ($Config.MaxPods) {
+        $args += "--kubelet-arg=max-pods=$($Config.MaxPods)"
+    }
+    
+    # TLS SANs
+    foreach ($san in $Config.TLSSans) {
+        $args += "--tls-san=$san"
+    }
+    
+    # Disable services
+    foreach ($service in $Config.DisableServices) {
+        $args += "--disable=$service"
+    }
+    
+    # Extra server arguments
+    if ($Config.ExtraServerArgs) {
+        $args += $Config.ExtraServerArgs
+    }
+    
+    # Standard arguments
+    $args += "--token=$($Config.K3sToken)"
+    $args += "--write-kubeconfig-mode=644"
+    
+    # First server gets cluster-init, others join
+    if ($IsFirstServer) {
+        $args += "--cluster-init"
+    }
+    
+    return $args -join " "
+}
+
+# Function to build K3s agent arguments based on configuration  
+function Get-K3sAgentArgs {
+    param(
+        [Parameter(Mandatory=$true)]
+        [hashtable]$Config,
+        [Parameter(Mandatory=$true)]
+        [string]$ServerURL
+    )
+    
+    $args = @()
+    
+    # Basic agent arguments
+    $args += "--server=$ServerURL"
+    $args += "--token=$($Config.K3sToken)"
+    
+    # Kubelet arguments
+    if ($Config.MaxPods) {
+        $args += "--kubelet-arg=max-pods=$($Config.MaxPods)"
+    }
+    
+    # Extra agent arguments
+    if ($Config.ExtraAgentArgs) {
+        $args += $Config.ExtraAgentArgs
+    }
+    
+    return $args -join " "
+}
+
 # Export functions
-Export-ModuleMember -Function Load-ClusterConfig, Get-SSHCommand, Copy-FileToNode, Copy-FileFromNode, Invoke-SSHCommand
+Export-ModuleMember -Function Load-ClusterConfig, Get-SSHCommand, Copy-FileToNode, Copy-FileFromNode, Invoke-SSHCommand, Get-K3sServerArgs, Get-K3sAgentArgs

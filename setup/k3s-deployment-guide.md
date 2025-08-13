@@ -98,6 +98,35 @@ Edit the `cluster.json` file in the repository root to match your environment:
 - Modify `disableServices` to exclude unwanted K3s components
 - Set appropriate timeout and retention values for your environment
 
+**Kubernetes Configuration Options:**
+- `serviceCIDR`: IP range for Kubernetes services (default: 10.43.0.0/16)
+- `clusterCIDR`: IP range for pods (default: 10.42.0.0/16) 
+- `clusterDNS`: DNS server IP for pods (default: 10.43.0.10)
+- `clusterDomain`: DNS domain for cluster (default: cluster.local)
+- `nodePortRange`: Port range for NodePort services (default: 30000-32767)
+- `maxPods`: Maximum pods per node (default: 110)
+
+**Advanced K3s Configuration:**
+- `extraArgs.server`: Additional arguments for K3s server nodes
+- `extraArgs.agent`: Additional arguments for K3s agent (worker) nodes
+
+**Example custom configurations:**
+```json
+{
+  "kubernetes": {
+    "serviceCIDR": "172.20.0.0/16",
+    "clusterCIDR": "172.21.0.0/16",
+    "maxPods": 200
+  },
+  "k3s": {
+    "extraArgs": {
+      "server": ["--kube-apiserver-arg=audit-log-path=/var/log/audit.log"],
+      "agent": ["--kubelet-arg=image-gc-high-threshold=90"]
+    }
+  }
+}
+```
+
 ## Deployment Process
 
 ### Option 1: Full Automated Deployment
