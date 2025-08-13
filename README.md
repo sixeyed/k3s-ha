@@ -55,13 +55,17 @@ This repository provides a complete Infrastructure-as-Code solution for deployin
    ```
 
 2. **Update configuration**
-   Edit the IP addresses in [k3s-complete-setup.ps1](/setup/k3s-complete-setup.ps1):
-   ```powershell
-   $Config = @{
-       ProxyIP = "10.0.1.100"
-       MasterIPs = @("10.0.1.10", "10.0.1.11", "10.0.1.12")
-       WorkerIPs = @("10.0.1.20", "10.0.1.21", "10.0.1.22", "10.0.1.23", "10.0.1.24", "10.0.1.25")
-       SSHUser = "ubuntu"
+   Edit the [cluster.json](/cluster.json) file to match your environment:
+   ```json
+   {
+     "network": {
+       "proxyIP": "10.0.1.100",
+       "masterIPs": ["10.0.1.10", "10.0.1.11", "10.0.1.12"],
+       "workerIPs": ["10.0.1.20", "10.0.1.21", "10.0.1.22", "10.0.1.23", "10.0.1.24", "10.0.1.25"]
+     },
+     "ssh": {
+       "user": "ubuntu"
+     }
    }
    ```
 
@@ -100,6 +104,13 @@ This repository provides a complete Infrastructure-as-Code solution for deployin
 ### Upgrade Cluster
 ```powershell
 ./operations/k3s-upgrade-cluster.ps1 -NewK3sVersion "v1.31.2+k3s1"
+```
+
+### Using Custom Configuration
+```powershell
+# Use a different configuration file
+./setup/k3s-complete-setup.ps1 -ConfigFile "staging-cluster.json"
+./operations/k3s-add-node.ps1 -NodeType worker -NewNodeIP "10.0.1.26" -ConfigFile "staging-cluster.json"
 ```
 
 ### Check Cluster Health

@@ -2,42 +2,25 @@
 # Handles certificate rotation for K3s cluster
 
 param(
-    [string[]]$MasterIPs = @("10.0.1.10", "10.0.1.11", "10.0.1.12"),
-    [string[]]$WorkerIPs = @("10.0.1.20", "10.0.1.21", "10.0.1.22", "10.0.1.23", "10.0.1.24", "10.0.1.25"),
-    [string]$SSHUser = "ubuntu",
-    [string]$SSHKeyPath = "$HOME\.ssh\id_rsa",
+    [Parameter(Mandatory=$false)]
+    [string]$ConfigFile = "../cluster.json",
+    
     [switch]$CheckOnly,
     [switch]$Force
 )
 
 Write-Host "=== K3s Certificate Renewal Script ===" -ForegroundColor Green
 
-# Helper functions
-function Invoke-SSHCommand {
-    param(
-        [string]$Node,
-        [string]$Command
-    )
-    ssh -i $SSHKeyPath -o StrictHostKeyChecking=no $SSHUser@$Node $Command
-}
+#########################################
+# CONFIGURATION LOADING
+#########################################
 
-function Copy-FileToNode {
-    param(
-        [string]$Node,
-        [string]$LocalPath,
-        [string]$RemotePath
-    )
-    scp -i $SSHKeyPath -o StrictHostKeyChecking=no $LocalPath ${SSHUser}@${Node}:${RemotePath}
-}
+# Import configuration module
+Import-Module "$PSScriptRoot\..\lib\K3sCluster.psm1" -Force
 
-function Copy-FileFromNode {
-    param(
-        [string]$Node,
-        [string]$RemotePath,
-        [string]$LocalPath
-    )
-    scp -i $SSHKeyPath -o StrictHostKeyChecking=no ${SSHUser}@${Node}:${RemotePath} $LocalPath
-}
+# Load configuration
+Write-Host "Loading configuration from: $ConfigFile" -ForegroundColor Cyan
+$Config = Load-ClusterConfig -ConfigPath $ConfigFile
 
 # Certificate check script
 $certCheckScript = @'
@@ -172,13 +155,13 @@ Get-Content "renew-certs.sh" -Raw | ForEach-Object { $_ -replace "`r`n", "`n" } 
 # Check certificates on all nodes
 Write-Host "`n=== Checking Certificate Status ===" -ForegroundColor Green
 
-$allNodes = $MasterIPs + $WorkerIPs
+$allNodes = $Config.MasterIPs + $Config.WorkerIPs
 $nodesNeedingRenewal = @()
 
 foreach ($node in $allNodes) {
     Write-Host "`nChecking certificates on $node..." -ForegroundColor Yellow
     
-    Copy-FileToNode -Node $node -LocalPath "check-certs.sh" -RemotePath "/tmp/check-certs.sh"
+    Copy-FileToNode -Config $Config -Node $node -LocalPath "check-certs.sh" -RemotePath "/tmp/check-certs.sh"
     $certStatus = Invoke-SSHCommand -Node $node -Command "chmod +x /tmp/check-certs.sh && sudo /tmp/check-certs.sh"
     
     Write-Host $certStatus
@@ -223,12 +206,12 @@ if ($nodesNeedingRenewal.Count -eq 0 -and -not $Force) {
     
     # Renew certificates on master nodes first
     Write-Host "`n--- Renewing Master Node Certificates ---" -ForegroundColor Cyan
-    foreach ($master in $MasterIPs) {
+    foreach ($master in $Config.MasterIPs) {
         if ($nodesNeedingRenewal -contains $master -or $Force) {
             Write-Host "`nRenewing certificates on master $master..." -ForegroundColor Yellow
             
-            Copy-FileToNode -Node $master -LocalPath "renew-certs.sh" -RemotePath "/tmp/renew-certs.sh"
-            Invoke-SSHCommand -Node $master -Command "chmod +x /tmp/renew-certs.sh && sudo /tmp/renew-certs.sh"
+            Copy-FileToNode -Config $Config -Node $master -LocalPath "renew-certs.sh" -RemotePath "/tmp/renew-certs.sh"
+            Invoke-SSHCommand -Config $Config -Node $master -Command "chmod +x /tmp/renew-certs.sh && sudo /tmp/renew-certs.sh"
             
             # Wait for cluster to stabilize
             Start-Sleep -Seconds 30
@@ -245,12 +228,12 @@ if ($nodesNeedingRenewal.Count -eq 0 -and -not $Force) {
     
     # Renew certificates on worker nodes
     Write-Host "`n--- Renewing Worker Node Certificates ---" -ForegroundColor Cyan
-    foreach ($worker in $WorkerIPs) {
+    foreach ($worker in $Config.WorkerIPs) {
         if ($nodesNeedingRenewal -contains $worker -or $Force) {
             Write-Host "`nRenewing certificates on worker $worker..." -ForegroundColor Yellow
             
-            Copy-FileToNode -Node $worker -LocalPath "renew-certs.sh" -RemotePath "/tmp/renew-certs.sh"
-            Invoke-SSHCommand -Node $worker -Command "chmod +x /tmp/renew-certs.sh && sudo /tmp/renew-certs.sh"
+            Copy-FileToNode -Config $Config -Node $worker -LocalPath "renew-certs.sh" -RemotePath "/tmp/renew-certs.sh"
+            Invoke-SSHCommand -Config $Config -Node $worker -Command "chmod +x /tmp/renew-certs.sh && sudo /tmp/renew-certs.sh"
             
             Start-Sleep -Seconds 10
         }
@@ -277,11 +260,11 @@ if (Test-Path $kubeconfigPath) {
     Copy-Item $kubeconfigPath $backupPath
     
     Write-Host "Fetching updated kubeconfig from master..." -ForegroundColor Yellow
-    Copy-FileFromNode -Node $MasterIPs[0] -RemotePath "/etc/rancher/k3s/k3s.yaml" -LocalPath "$kubeconfigPath.new"
+    Copy-FileFromNode -Config $Config -Node $Config.MasterIPs[0] -RemotePath "/etc/rancher/k3s/k3s.yaml" -LocalPath "$kubeconfigPath.new"
     
     # Update server URL to use proxy
     $content = Get-Content "$kubeconfigPath.new" -Raw
-    $content = $content -replace 'https://127.0.0.1:6443', 'https://10.0.1.100:6443'
+    $content = $content -replace 'https://127.0.0.1:6443', "https://$($Config.ProxyIP):6443"
     $content | Set-Content $kubeconfigPath
     
     Remove-Item "$kubeconfigPath.new"

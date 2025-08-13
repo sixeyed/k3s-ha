@@ -44,31 +44,70 @@ foreach ($node in $nodes) {
 }
 ```
 
-### 2. Update Script Configuration
+### 2. Update Cluster Configuration
 
-Edit the configuration section in `k3s-complete-setup.ps1`:
+Edit the `cluster.json` file in the repository root to match your environment:
 
-```powershell
-$Config = @{
-    ProxyIP = "10.0.1.100"                    # Your proxy VM IP
-    MasterIPs = @("10.0.1.10", "10.0.1.11", "10.0.1.12")  # Your master IPs
-    WorkerIPs = @("10.0.1.20", "10.0.1.21", "10.0.1.22",  # Your worker IPs
-                  "10.0.1.23", "10.0.1.24", "10.0.1.25")
-    K3sVersion = "v1.31.1+k3s1"              # K3s version to install (Kubernetes 1.31)
-    StorageDevice = "/dev/sdb"                # Storage disk on masters
-    NFSMountPath = "/data/nfs"                # NFS mount point
-    SSHUser = "ubuntu"                        # SSH username
-    SSHKeyPath = "$HOME\.ssh\id_rsa"         # Path to SSH private key
+```json
+{
+  "cluster": {
+    "name": "k3s-ha-production",
+    "version": "v1.31.1+k3s1"
+  },
+  "network": {
+    "proxyIP": "10.0.1.100",
+    "masterIPs": [
+      "10.0.1.10",
+      "10.0.1.11", 
+      "10.0.1.12"
+    ],
+    "workerIPs": [
+      "10.0.1.20",
+      "10.0.1.21",
+      "10.0.1.22",
+      "10.0.1.23",
+      "10.0.1.24",
+      "10.0.1.25"
+    ]
+  },
+  "storage": {
+    "device": "/dev/sdb",
+    "nfsMountPath": "/data/nfs"
+  },
+  "ssh": {
+    "user": "ubuntu",
+    "keyPath": "~/.ssh/id_rsa"
+  },
+  "k3s": {
+    "token": null,
+    "disableServices": ["traefik"],
+    "tlsSans": []
+  },
+  "operations": {
+    "drainTimeout": 300,
+    "upgradeStrategy": "rolling",
+    "backupRetention": 7
+  }
 }
 ```
+
+**Configuration Notes:**
+- Update all IP addresses to match your environment
+- The `token` field can be left null (will be auto-generated)
+- The `tlsSans` array will auto-populate with proxy and master IPs if left empty
+- Modify `disableServices` to exclude unwanted K3s components
+- Set appropriate timeout and retention values for your environment
 
 ## Deployment Process
 
 ### Option 1: Full Automated Deployment
 
 ```powershell
-# Run the deployment script
+# Run the deployment script with default cluster.json
 .\k3s-complete-setup.ps1
+
+# Or specify a custom configuration file
+.\k3s-complete-setup.ps1 -ConfigFile "production-cluster.json"
 
 # Select option 1 for full deployment
 Select option (1-6): 1
@@ -270,15 +309,14 @@ For applications requiring direct NFS access:
 ### Adding a New Worker Node
 
 ```powershell
-# Add new worker IP to config
-$newWorkerIP = "10.0.1.26"
+# Add new worker node using operations script
+.\operations\k3s-add-node.ps1 -NodeType worker -NewNodeIP "10.0.1.26"
 
-# Get the K3s token from a master
-$token = ssh ubuntu@10.0.1.10 "sudo cat /var/lib/rancher/k3s/server/node-token"
+# Or specify custom configuration file
+.\operations\k3s-add-node.ps1 -NodeType worker -NewNodeIP "10.0.1.26" -ConfigFile "production-cluster.json"
 
-# Setup new worker
-scp setup-worker.sh ubuntu@$newWorkerIP:/tmp/
-ssh ubuntu@$newWorkerIP "chmod +x /tmp/setup-worker.sh && sudo /tmp/setup-worker.sh 10.0.1.100 $token v1.31.1+k3s1"
+# Add new master node
+.\operations\k3s-add-node.ps1 -NodeType master -NewNodeIP "10.0.1.13"
 ```
 
 ### Updating Nginx Proxy Configuration

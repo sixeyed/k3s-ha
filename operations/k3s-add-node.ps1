@@ -9,49 +9,44 @@ param(
     [Parameter(Mandatory=$true)]
     [string]$NewNodeIP,
     
-    [string]$ProxyIP = "10.0.1.100",
-    [string]$ExistingMasterIP = "10.0.1.10",
-    [string]$SSHUser = "ubuntu",
-    [string]$SSHKeyPath = "$HOME\.ssh\id_rsa",
-    [string]$StorageDevice = "/dev/sdb",  # For master nodes
-    [string]$NFSMountPath = "/data/nfs"   # For master nodes
+    [Parameter(Mandatory=$false)]
+    [string]$ConfigFile = "../cluster.json"
 )
 
 Write-Host "=== K3s Add Node to Cluster ===" -ForegroundColor Green
 Write-Host "Node Type: $NodeType" -ForegroundColor Yellow
 Write-Host "New Node IP: $NewNodeIP" -ForegroundColor Yellow
 
-# Helper functions
-function Invoke-SSHCommand {
-    param(
-        [string]$Node,
-        [string]$Command
-    )
-    ssh -i $SSHKeyPath -o StrictHostKeyChecking=no $SSHUser@$Node $Command
-}
+#########################################
+# CONFIGURATION LOADING
+#########################################
 
-function Copy-FileToNode {
-    param(
-        [string]$Node,
-        [string]$LocalPath,
-        [string]$RemotePath
-    )
-    scp -i $SSHKeyPath -o StrictHostKeyChecking=no $LocalPath ${SSHUser}@${Node}:${RemotePath}
-}
+# Import cluster management module
+Import-Module "$PSScriptRoot\..\lib\K3sCluster.psm1" -Force
+
+# Load configuration
+Write-Host "Loading configuration from: $ConfigFile" -ForegroundColor Cyan
+$Config = Load-ClusterConfig -ConfigPath $ConfigFile
+
+# Helper functions (now using shared module functions)
 
 # Get cluster information
 Write-Host "`nGathering cluster information..." -ForegroundColor Cyan
 
-# Get K3s token
-$k3sToken = Invoke-SSHCommand -Node $ExistingMasterIP -Command "sudo cat /var/lib/rancher/k3s/server/node-token"
+# Get K3s token from first master
+$existingMasterIP = $Config.MasterIPs[0]
+$k3sToken = Invoke-SSHCommand -Config $Config -Node $existingMasterIP -Command "sudo cat /var/lib/rancher/k3s/server/node-token"
 if ([string]::IsNullOrEmpty($k3sToken)) {
     Write-Host "Error: Could not retrieve K3s token from master" -ForegroundColor Red
     exit 1
 }
 
-# Get K3s version
-$k3sVersion = Invoke-SSHCommand -Node $ExistingMasterIP -Command "k3s --version | grep -oP 'k3s version \K[^\s]+'"
-Write-Host "Cluster K3s version: $k3sVersion" -ForegroundColor Green
+# Get K3s version from config (or detect from cluster)
+$k3sVersion = $Config.K3sVersion
+if ([string]::IsNullOrEmpty($k3sVersion)) {
+    $k3sVersion = Invoke-SSHCommand -Config $Config -Node $existingMasterIP -Command "k3s --version | grep -oP 'k3s version \K[^\s]+'"
+}
+Write-Host "Using K3s version: $k3sVersion" -ForegroundColor Green
 
 # Create setup script based on node type
 if ($NodeType -eq "master") {
@@ -88,8 +83,8 @@ fi
     $nginxUpdateScript | Out-File -FilePath "update-nginx.sh" -Encoding UTF8
     Get-Content "update-nginx.sh" -Raw | ForEach-Object { $_ -replace "`r`n", "`n" } | Set-Content "update-nginx.sh" -NoNewline
     
-    Copy-FileToNode -Node $ProxyIP -LocalPath "update-nginx.sh" -RemotePath "/tmp/update-nginx.sh"
-    Invoke-SSHCommand -Node $ProxyIP -Command "chmod +x /tmp/update-nginx.sh && /tmp/update-nginx.sh"
+    Copy-FileToNode -Config $Config -Node $ProxyIP -LocalPath "update-nginx.sh" -RemotePath "/tmp/update-nginx.sh"
+    Invoke-SSHCommand -Config $Config -Node $ProxyIP -Command "chmod +x /tmp/update-nginx.sh && /tmp/update-nginx.sh"
     
     # Create master setup script
     $masterSetupScript = @"
@@ -214,10 +209,10 @@ if ($NodeType -eq "master") {
 Get-Content $setupScriptPath -Raw | ForEach-Object { $_ -replace "`r`n", "`n" } | Set-Content $setupScriptPath -NoNewline
 
 Write-Host "`nDeploying setup script to new node..." -ForegroundColor Yellow
-Copy-FileToNode -Node $NewNodeIP -LocalPath $setupScriptPath -RemotePath "/tmp/$setupScriptPath"
+Copy-FileToNode -Config $Config -Node $NewNodeIP -LocalPath $setupScriptPath -RemotePath "/tmp/$setupScriptPath"
 
 Write-Host "Running setup on new node (this may take several minutes)..." -ForegroundColor Yellow
-Invoke-SSHCommand -Node $NewNodeIP -Command "chmod +x /tmp/$setupScriptPath && sudo /tmp/$setupScriptPath"
+Invoke-SSHCommand -Config $Config -Node $NewNodeIP -Command "chmod +x /tmp/$setupScriptPath && sudo /tmp/$setupScriptPath"
 
 # Wait for node to join
 Write-Host "`nWaiting for node to join cluster..." -ForegroundColor Cyan

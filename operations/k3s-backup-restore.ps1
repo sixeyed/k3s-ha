@@ -6,11 +6,11 @@ param(
     [ValidateSet("backup", "restore", "list", "schedule")]
     [string]$Operation,
     
-    [string[]]$MasterIPs = @("10.0.1.10", "10.0.1.11", "10.0.1.12"),
+    [Parameter(Mandatory=$false)]
+    [string]$ConfigFile = "../cluster.json",
+    
     [string]$BackupLocation = "\\fileserver\k3s-backups",  # Or local path
     [string]$RestoreSnapshot,  # For restore operation
-    [string]$SSHUser = "ubuntu",
-    [string]$SSHKeyPath = "$HOME\.ssh\id_rsa",
     [switch]$IncludeNFSData,
     [switch]$IncludeWorkloads
 )
@@ -18,32 +18,16 @@ param(
 Write-Host "=== K3s Backup and Restore Script ===" -ForegroundColor Green
 Write-Host "Operation: $Operation" -ForegroundColor Yellow
 
-# Helper functions
-function Invoke-SSHCommand {
-    param(
-        [string]$Node,
-        [string]$Command
-    )
-    ssh -i $SSHKeyPath -o StrictHostKeyChecking=no $SSHUser@$Node $Command
-}
+#########################################
+# CONFIGURATION LOADING
+#########################################
 
-function Copy-FileFromNode {
-    param(
-        [string]$Node,
-        [string]$RemotePath,
-        [string]$LocalPath
-    )
-    scp -i $SSHKeyPath -o StrictHostKeyChecking=no ${SSHUser}@${Node}:${RemotePath} $LocalPath
-}
+# Import configuration module
+Import-Module "$PSScriptRoot\..\lib\K3sCluster.psm1" -Force
 
-function Copy-FileToNode {
-    param(
-        [string]$Node,
-        [string]$LocalPath,
-        [string]$RemotePath
-    )
-    scp -i $SSHKeyPath -o StrictHostKeyChecking=no $LocalPath ${SSHUser}@${Node}:${RemotePath}
-}
+# Load configuration
+Write-Host "Loading configuration from: $ConfigFile" -ForegroundColor Cyan
+$Config = Load-ClusterConfig -ConfigPath $ConfigFile
 
 # Create backup directory structure
 $backupDate = Get-Date -Format "yyyyMMdd_HHmmss"
@@ -204,25 +188,25 @@ switch ($Operation) {
         New-Item -ItemType Directory -Path $backupPath -Force | Out-Null
         
         # Backup from each master
-        foreach ($master in $MasterIPs) {
+        foreach ($master in $Config.MasterIPs) {
             Write-Host "`nBacking up master $master..." -ForegroundColor Yellow
             
             $backupName = "manual-backup-$backupDate"
             $includeNFS = if ($IncludeNFSData) { "true" } else { "false" }
             
             # Copy and execute backup script
-            Copy-FileToNode -Node $master -LocalPath "k3s-backup.sh" -RemotePath "/tmp/k3s-backup.sh"
-            Invoke-SSHCommand -Node $master -Command "chmod +x /tmp/k3s-backup.sh && sudo /tmp/k3s-backup.sh $backupName $includeNFS"
+            Copy-FileToNode -Config $Config -Node $master -LocalPath "k3s-backup.sh" -RemotePath "/tmp/k3s-backup.sh"
+            Invoke-SSHCommand -Config $Config -Node $master -Command "chmod +x /tmp/k3s-backup.sh && sudo /tmp/k3s-backup.sh $backupName $includeNFS"
             
             # Download backup
             $remoteBackup = Invoke-SSHCommand -Node $master -Command "ls -t /tmp/k3s-backup-*.tar.gz | head -1"
             if ($remoteBackup) {
                 $localBackup = Join-Path $backupPath "master-$master-backup.tar.gz"
-                Copy-FileFromNode -Node $master -RemotePath $remoteBackup -LocalPath $localBackup
+                Copy-FileFromNode -Config $Config -Node $master -RemotePath $remoteBackup -LocalPath $localBackup
                 Write-Host "✓ Backup saved to $localBackup" -ForegroundColor Green
                 
                 # Cleanup remote backup
-                Invoke-SSHCommand -Node $master -Command "sudo rm -f $remoteBackup"
+                Invoke-SSHCommand -Config $Config -Node $master -Command "sudo rm -f $remoteBackup"
             }
         }
         
@@ -260,7 +244,7 @@ K3s Cluster Backup Summary
 ========================
 Date: $(Get-Date)
 Location: $backupPath
-Masters Backed Up: $($MasterIPs -join ', ')
+Masters Backed Up: $($Config.MasterIPs -join ', ')
 Include NFS Data: $IncludeNFSData
 Include Workloads: $IncludeWorkloads
 
@@ -302,15 +286,15 @@ Backup Contents:
         Write-Host "Found backup: $($backupFile.FullName)" -ForegroundColor Green
         
         # Restore on first master
-        $primaryMaster = $MasterIPs[0]
+        $primaryMaster = $Config.MasterIPs[0]
         Write-Host "`nRestoring on primary master $primaryMaster..." -ForegroundColor Yellow
         
         # Copy backup and restore script
-        Copy-FileToNode -Node $primaryMaster -LocalPath $backupFile.FullName -RemotePath "/tmp/restore-backup.tar.gz"
-        Copy-FileToNode -Node $primaryMaster -LocalPath "k3s-restore.sh" -RemotePath "/tmp/k3s-restore.sh"
+        Copy-FileToNode -Config $Config -Node $primaryMaster -LocalPath $backupFile.FullName -RemotePath "/tmp/restore-backup.tar.gz"
+        Copy-FileToNode -Config $Config -Node $primaryMaster -LocalPath "k3s-restore.sh" -RemotePath "/tmp/k3s-restore.sh"
         
         # Execute restore
-        Invoke-SSHCommand -Node $primaryMaster -Command "chmod +x /tmp/k3s-restore.sh && sudo /tmp/k3s-restore.sh /tmp/restore-backup.tar.gz $RestoreSnapshot"
+        Invoke-SSHCommand -Config $Config -Node $primaryMaster -Command "chmod +x /tmp/k3s-restore.sh && sudo /tmp/k3s-restore.sh /tmp/restore-backup.tar.gz $RestoreSnapshot"
         
         Write-Host "`n⚠️  Restore initiated. The cluster will restart." -ForegroundColor Yellow
         Write-Host "Monitor the cluster health and rejoin other masters if needed." -ForegroundColor Yellow
@@ -341,7 +325,7 @@ Backup Contents:
         
         # List snapshots on masters
         Write-Host "`n=== etcd Snapshots on Masters ===" -ForegroundColor Green
-        foreach ($master in $MasterIPs) {
+        foreach ($master in $Config.MasterIPs) {
             Write-Host "`nMaster $master snapshots:" -ForegroundColor Yellow
             $snapshots = Invoke-SSHCommand -Node $master -Command "sudo k3s etcd-snapshot list 2>/dev/null | tail -n +2"
             if ($snapshots) {
@@ -355,11 +339,11 @@ Backup Contents:
     "schedule" {
         Write-Host "`n=== Scheduling Automated Backups ===" -ForegroundColor Green
         
-        foreach ($master in $MasterIPs) {
+        foreach ($master in $Config.MasterIPs) {
             Write-Host "`nConfiguring automated backups on $master..." -ForegroundColor Yellow
             
-            Copy-FileToNode -Node $master -LocalPath "k3s-schedule-backup.sh" -RemotePath "/tmp/k3s-schedule-backup.sh"
-            Invoke-SSHCommand -Node $master -Command "chmod +x /tmp/k3s-schedule-backup.sh && sudo /tmp/k3s-schedule-backup.sh"
+            Copy-FileToNode -Config $Config -Node $master -LocalPath "k3s-schedule-backup.sh" -RemotePath "/tmp/k3s-schedule-backup.sh"
+            Invoke-SSHCommand -Config $Config -Node $master -Command "chmod +x /tmp/k3s-schedule-backup.sh && sudo /tmp/k3s-schedule-backup.sh"
         }
         
         Write-Host "`n✓ Automated backups configured" -ForegroundColor Green

@@ -1,45 +1,23 @@
 # Complete K3s HA Cluster Setup with Nginx Proxy and NFS Storage
 # Architecture: 1 Nginx Proxy + 3 Control Plane (with NFS) + 6 Worker Nodes
 
+param(
+    [Parameter(Mandatory=$false)]
+    [string]$ConfigFile = "cluster.json"
+)
+
 #########################################
-# CONFIGURATION SECTION
+# CONFIGURATION LOADING
 #########################################
 
-# Node Configuration
-$Config = @{
-    ProxyIP = "10.0.1.100"
-    MasterIPs = @("10.0.1.10", "10.0.1.11", "10.0.1.12")
-    WorkerIPs = @("10.0.1.20", "10.0.1.21", "10.0.1.22", "10.0.1.23", "10.0.1.24", "10.0.1.25")
-    K3sVersion = "v1.31.1+k3s1"  # Latest stable K3s with Kubernetes 1.31
-    K3sToken = "k3s-ha-token-$(Get-Random -Maximum 999999)"
-    StorageDevice = "/dev/sdb"
-    NFSMountPath = "/data/nfs"
-    SSHUser = "ubuntu"  # Change to your SSH user
-    SSHKeyPath = "$HOME\.ssh\id_rsa"
-}
+# Import configuration module
+Import-Module "$PSScriptRoot\..\lib\K3sCluster.psm1" -Force
 
-# Helper function for SSH execution
-function Invoke-SSHCommand {
-    param(
-        [string]$Node,
-        [string]$Command,
-        [string]$User = $Config.SSHUser,
-        [string]$KeyPath = $Config.SSHKeyPath
-    )
-    ssh -i $KeyPath -o StrictHostKeyChecking=no $User@$Node $Command
-}
+# Load configuration
+Write-Host "Loading configuration from: $ConfigFile" -ForegroundColor Cyan
+$Config = Load-ClusterConfig -ConfigPath $ConfigFile
 
-# Helper function to copy files via SCP
-function Copy-FileToNode {
-    param(
-        [string]$Node,
-        [string]$LocalPath,
-        [string]$RemotePath,
-        [string]$User = $Config.SSHUser,
-        [string]$KeyPath = $Config.SSHKeyPath
-    )
-    scp -i $KeyPath -o StrictHostKeyChecking=no $LocalPath ${User}@${Node}:${RemotePath}
-}
+# Helper functions (now using shared module functions)
 
 #########################################
 # NGINX PROXY CONFIGURATION
@@ -66,9 +44,7 @@ stream {
     
     upstream k3s_api {
         least_conn;
-        server 10.0.1.10:6443 max_fails=3 fail_timeout=5s;
-        server 10.0.1.11:6443 max_fails=3 fail_timeout=5s;
-        server 10.0.1.12:6443 max_fails=3 fail_timeout=5s;
+        ###MASTER_SERVERS###
     }
     
     server {
@@ -185,6 +161,8 @@ K3S_TOKEN=$3
 K3S_VERSION=$4
 STORAGE_DEVICE=$5
 NFS_MOUNT_PATH=$6
+TLS_SANS="$7"
+DISABLE_SERVICES="$8"
 
 echo "Setting up K3s Master Node $MASTER_NUMBER"
 
@@ -251,22 +229,16 @@ if [ "$MASTER_NUMBER" -eq 1 ]; then
     curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION=$K3S_VERSION sh -s - server \
         --cluster-init \
         --token=$K3S_TOKEN \
-        --tls-san=10.0.1.100 \
-        --tls-san=10.0.1.10 \
-        --tls-san=10.0.1.11 \
-        --tls-san=10.0.1.12 \
-        --disable=traefik \
+        $TLS_SANS \
+        $DISABLE_SERVICES \
         --write-kubeconfig-mode=644
 else
     echo "Installing additional K3s master"
     curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION=$K3S_VERSION sh -s - server \
         --server https://${FIRST_MASTER_IP}:6443 \
         --token=$K3S_TOKEN \
-        --tls-san=10.0.1.100 \
-        --tls-san=10.0.1.10 \
-        --tls-san=10.0.1.11 \
-        --tls-san=10.0.1.12 \
-        --disable=traefik \
+        $TLS_SANS \
+        $DISABLE_SERVICES \
         --write-kubeconfig-mode=644
 fi
 
@@ -422,14 +394,14 @@ spec:
             - name: PROVISIONER_NAME
               value: k3s.io/nfs
             - name: NFS_SERVER
-              value: 10.0.1.10  # Primary master NFS
+              value: ###PRIMARY_MASTER_IP###  # Primary master NFS
             - name: NFS_PATH
-              value: /data/nfs/shared
+              value: ###NFS_MOUNT_PATH###/shared
       volumes:
         - name: nfs-client-root
           nfs:
-            server: 10.0.1.10
-            path: /data/nfs/shared
+            server: ###PRIMARY_MASTER_IP###
+            path: ###NFS_MOUNT_PATH###/shared
 ---
 apiVersion: storage.k8s.io/v1
 kind: StorageClass
@@ -470,21 +442,30 @@ Write-Host "  Workers: $($Config.WorkerIPs -join ', ')" -ForegroundColor White
 function Deploy-Scripts {
     Write-Host "`n=== Preparing deployment scripts ===" -ForegroundColor Green
     
+    # Generate master server lines for Nginx upstream
+    $masterServers = ""
+    foreach ($masterIP in $Config.MasterIPs) {
+        $masterServers += "        server ${masterIP}:6443 max_fails=3 fail_timeout=5s;`n"
+    }
+    $masterServers = $masterServers.TrimEnd("`n")
+    
     # Prepare Nginx config with actual IPs
-    $NginxConfigFinal = $NginxConfig -replace '10.0.1.10', $Config.MasterIPs[0]
-    $NginxConfigFinal = $NginxConfigFinal -replace '10.0.1.11', $Config.MasterIPs[1]
-    $NginxConfigFinal = $NginxConfigFinal -replace '10.0.1.12', $Config.MasterIPs[2]
+    $NginxConfigFinal = $NginxConfig -replace '###MASTER_SERVERS###', $masterServers
     
     # Prepare proxy setup script
     $ProxySetupFinal = $ProxySetupScript -replace '###NGINX_CONFIG###', $NginxConfigFinal
     $ProxySetupFinal = $ProxySetupFinal -replace '###PROXY_IP###', $Config.ProxyIP
+    
+    # Prepare NFS provisioner YAML with actual IPs
+    $NFSProvisionerFinal = $NFSProvisionerYaml -replace '###PRIMARY_MASTER_IP###', $Config.MasterIPs[0]
+    $NFSProvisionerFinal = $NFSProvisionerFinal -replace '###NFS_MOUNT_PATH###', $Config.NFSMountPath
     
     # Save scripts locally
     $NginxConfigFinal | Out-File -FilePath "nginx.conf" -Encoding UTF8
     $ProxySetupFinal | Out-File -FilePath "setup-proxy.sh" -Encoding UTF8
     $MasterSetupScript | Out-File -FilePath "setup-master.sh" -Encoding UTF8
     $WorkerSetupScript | Out-File -FilePath "setup-worker.sh" -Encoding UTF8
-    $NFSProvisionerYaml | Out-File -FilePath "nfs-provisioner.yaml" -Encoding UTF8
+    $NFSProvisionerFinal | Out-File -FilePath "nfs-provisioner.yaml" -Encoding UTF8
     
     # Convert line endings for Linux
     Get-ChildItem *.sh | ForEach-Object {
@@ -498,8 +479,8 @@ function Setup-ProxyNode {
     Write-Host "`n=== Setting up Nginx Proxy ===" -ForegroundColor Green
     
     # Copy and execute setup script
-    Copy-FileToNode -Node $Config.ProxyIP -LocalPath "setup-proxy.sh" -RemotePath "/tmp/setup-proxy.sh"
-    Invoke-SSHCommand -Node $Config.ProxyIP -Command "chmod +x /tmp/setup-proxy.sh && sudo /tmp/setup-proxy.sh"
+    Copy-FileToNode -Config $Config -Node $Config.ProxyIP -LocalPath "setup-proxy.sh" -RemotePath "/tmp/setup-proxy.sh"
+    Invoke-SSHCommand -Config $Config -Node $Config.ProxyIP -Command "chmod +x /tmp/setup-proxy.sh && sudo /tmp/setup-proxy.sh"
     
     Write-Host "Proxy setup complete!" -ForegroundColor Green
 }
@@ -508,6 +489,20 @@ function Setup-ProxyNode {
 function Setup-MasterNodes {
     Write-Host "`n=== Setting up Master Nodes ===" -ForegroundColor Green
     
+    # Build TLS SAN arguments
+    $tlsSanArgs = ""
+    foreach ($san in $Config.TLSSans) {
+        $tlsSanArgs += "--tls-san=$san "
+    }
+    $tlsSanArgs = $tlsSanArgs.Trim()
+    
+    # Build disable service arguments
+    $disableArgs = ""
+    foreach ($service in $Config.DisableServices) {
+        $disableArgs += "--disable=$service "
+    }
+    $disableArgs = $disableArgs.Trim()
+    
     for ($i = 0; $i -lt $Config.MasterIPs.Count; $i++) {
         $masterIP = $Config.MasterIPs[$i]
         $masterNumber = $i + 1
@@ -515,11 +510,11 @@ function Setup-MasterNodes {
         Write-Host "`nSetting up Master $masterNumber ($masterIP)..." -ForegroundColor Yellow
         
         # Copy setup script
-        Copy-FileToNode -Node $masterIP -LocalPath "setup-master.sh" -RemotePath "/tmp/setup-master.sh"
+        Copy-FileToNode -Config $Config -Node $masterIP -LocalPath "setup-master.sh" -RemotePath "/tmp/setup-master.sh"
         
         # Execute setup script
-        $setupCmd = "chmod +x /tmp/setup-master.sh && sudo /tmp/setup-master.sh $masterNumber $($Config.MasterIPs[0]) $($Config.K3sToken) $($Config.K3sVersion) $($Config.StorageDevice) $($Config.NFSMountPath)"
-        Invoke-SSHCommand -Node $masterIP -Command $setupCmd
+        $setupCmd = "chmod +x /tmp/setup-master.sh && sudo /tmp/setup-master.sh $masterNumber $($Config.MasterIPs[0]) $($Config.K3sToken) $($Config.K3sVersion) $($Config.StorageDevice) $($Config.NFSMountPath) `"$tlsSanArgs`" `"$disableArgs`""
+        Invoke-SSHCommand -Config $Config -Node $masterIP -Command $setupCmd
         
         if ($i -eq 0) {
             Write-Host "Waiting for first master to initialize..." -ForegroundColor Cyan
@@ -540,11 +535,11 @@ function Setup-WorkerNodes {
         Write-Host "`nSetting up Worker ($workerIP)..." -ForegroundColor Yellow
         
         # Copy setup script
-        Copy-FileToNode -Node $workerIP -LocalPath "setup-worker.sh" -RemotePath "/tmp/setup-worker.sh"
+        Copy-FileToNode -Config $Config -Node $workerIP -LocalPath "setup-worker.sh" -RemotePath "/tmp/setup-worker.sh"
         
         # Execute setup script
         $setupCmd = "chmod +x /tmp/setup-worker.sh && sudo /tmp/setup-worker.sh $($Config.ProxyIP) $($Config.K3sToken) $($Config.K3sVersion)"
-        Invoke-SSHCommand -Node $workerIP -Command $setupCmd
+        Invoke-SSHCommand -Config $Config -Node $workerIP -Command $setupCmd
         
         Start-Sleep -Seconds 10
     }
