@@ -1,0 +1,19 @@
+# Vagrant artifacts
+test/minimal-cluster/.vagrant/
+test/minimal-cluster/*.vdi
+.DS_Store
+
+# Generated deployment scripts (now in setup/config/ with its own .gitignore)
+# This section is kept for legacy cleanup
+
+# Kubernetes config files
+.kube/
+kubeconfig*
+
+# PowerShell temporary files
+*.tmp
+*.log
+
+# OS specific
+Thumbs.db
+ehthumbs.db
