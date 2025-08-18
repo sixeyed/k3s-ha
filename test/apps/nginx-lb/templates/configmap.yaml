@@ -1,0 +1,36 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "nginx-lb.fullname" . }}-html
+  labels:
+    {{- include "nginx-lb.labels" . | nindent 4 }}
+data:
+  index.html: |
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>K3s LoadBalancer Demo</title>
+        <style>
+            body { font-family: Arial, sans-serif; margin: 40px; background: #f4f4f4; }
+            .container { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+            h1 { color: #333; }
+            .info { background: #e7f3ff; padding: 15px; border-radius: 4px; margin: 10px 0; }
+            .success { color: #4CAF50; }
+            .pod-info { font-family: monospace; background: #f0f0f0; padding: 5px; border-radius: 3px; }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h1>K3s Cluster Demo - LoadBalancer Service</h1>
+            <div class="info">
+                <p><strong>Cluster:</strong> k3s-vagrant-test</p>
+                <p><strong>Service Type:</strong> LoadBalancer (via NodePort)</p>
+                <p><strong>Pod:</strong> <span class="pod-info" id="hostname">HOSTNAME_PLACEHOLDER</span></p>
+                <p><strong>Status:</strong> <span class="success">LoadBalancer Working!</span></p>
+            </div>
+            <p>This nginx server is running behind a LoadBalancer service in your K3s cluster.</p>
+            <p>Refresh the page to see load balancing between different pods.</p>
+            <p><strong>Test the load balancing:</strong> Each refresh may show a different pod name above.</p>
+        </div>
+    </body>
+    </html>

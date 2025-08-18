@@ -1,0 +1,6 @@
+apiVersion: v2
+name: redis-local
+description: Redis with local persistent storage
+type: application
+version: 0.1.0
+appVersion: "7.2"

@@ -1,0 +1,58 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "nginx-lb.fullname" . }}
+  labels:
+    {{- include "nginx-lb.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "nginx-lb.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "nginx-lb.selectorLabels" . | nindent 8 }}
+    spec:
+      initContainers:
+        - name: setup-html
+          image: busybox:1.35
+          command: ['sh', '-c']
+          args:
+            - |
+              cp /tmp/index-template.html /shared/index.html
+              sed -i "s/HOSTNAME_PLACEHOLDER/$(hostname)/g" /shared/index.html
+          volumeMounts:
+            - name: html-template
+              mountPath: /tmp/index-template.html
+              subPath: index.html
+              readOnly: true
+            - name: html-shared
+              mountPath: /shared
+      containers:
+        - name: {{ .Chart.Name }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 80
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: html-shared
+              mountPath: /usr/share/nginx/html
+      volumes:
+        - name: html-template
+          configMap:
+            name: {{ include "nginx-lb.fullname" . }}-html
+        - name: html-shared
+          emptyDir: {}
