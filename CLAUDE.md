@@ -38,13 +38,15 @@ Key architectural decisions:
 # Use custom configuration file
 ./setup/k3s-setup.ps1 -ConfigFile "production-cluster.json"
 
-# Select option 1 for complete deployment
+# Explicit action (same as default)
+./setup/k3s-setup.ps1 -Action Deploy
+
 # Step-by-step deployment options:
-# Option 2: Generate scripts only
-# Option 3: Deploy proxy only  
-# Option 4: Deploy masters only
-# Option 5: Deploy workers only
-# Option 6: Configure cluster only
+./setup/k3s-setup.ps1 -Action PrepareOnly     # Generate scripts only
+./setup/k3s-setup.ps1 -Action ProxyOnly      # Deploy proxy only  
+./setup/k3s-setup.ps1 -Action MastersOnly    # Deploy masters only
+./setup/k3s-setup.ps1 -Action WorkersOnly    # Deploy workers only
+./setup/k3s-setup.ps1 -Action ConfigureOnly  # Configure cluster only
 ```
 
 ### Configuration Testing & Validation
@@ -57,7 +59,7 @@ Key architectural decisions:
 cd test/minimal-cluster
 ./vagrant-setup.ps1 prereqs   # Check prerequisites first
 ./vagrant-setup.ps1 up        # Start 3 VMs (checks prereqs automatically)
-pwsh ../../setup/k3s-setup.ps1 -ConfigFile test/minimal-cluster/vagrant-cluster.json  # Deploy K3s cluster
+pwsh ../../setup/k3s-setup.ps1 -ConfigFile test/minimal-cluster/vagrant-cluster.json  # Deploy K3s cluster (automatic)
 ./vagrant-setup.ps1 destroy   # Clean up
 
 # Deploy minimal test cluster on remote VMs

@@ -88,7 +88,7 @@ This repository provides a complete Infrastructure-as-Code solution for deployin
 3. **Run deployment**
    ```powershell
    ./setup/k3s-setup.ps1
-   # Select option 1 for full deployment
+   # Defaults to full deployment (-Action Deploy)
    ```
 
 4. **Verify cluster**
@@ -153,8 +153,8 @@ cd test/minimal-cluster
 ./vagrant-setup.ps1 up
 
 # 4. Deploy K3s cluster 
-pwsh ../../setup/k3s-setup.ps1 -ConfigFile test/minimal-cluster/vagrant-cluster.json
-# Select option 1 for full deployment
+pwsh ../../setup/k3s-setup.ps1 -ConfigFile vagrant-cluster.json
+# Automatically deploys full cluster
 
 # 5. Verify cluster
 kubectl get nodes
@@ -192,7 +192,15 @@ kubectl get pods -A
 ```powershell
 # Use different configuration files for different environments
 ./setup/k3s-setup.ps1 -ConfigFile "staging-cluster.json"
-./setup/k3s-setup.ps1 -ConfigFile "production-cluster.json"
+./setup/k3s-setup.ps1 -ConfigFile "production-cluster.json" -Action Deploy
+
+# Step-by-step deployment options
+./setup/k3s-setup.ps1 -Action PrepareOnly        # Generate scripts only
+./setup/k3s-setup.ps1 -Action ProxyOnly         # Deploy proxy only
+./setup/k3s-setup.ps1 -Action MastersOnly       # Deploy masters only
+./setup/k3s-setup.ps1 -Action WorkersOnly       # Deploy workers only
+./setup/k3s-setup.ps1 -Action ConfigureOnly     # Configure cluster only
+
 ./operations/k3s-add-node.ps1 -NodeType worker -NewNodeIP "10.0.1.26" -ConfigFile "staging-cluster.json"
 ```
 

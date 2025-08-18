@@ -1,12 +1,23 @@
 # Complete K3s HA Cluster Setup with Nginx Proxy and NFS Storage
 # Architecture: 1 Nginx Proxy + 3 Control Plane (with NFS) + 6 Worker Nodes
+#
+# Usage Examples:
+#   ./k3s-setup.ps1                                          # Full deployment with default config
+#   ./k3s-setup.ps1 -Action Deploy                          # Same as above (explicit)
+#   ./k3s-setup.ps1 -Action PrepareOnly                     # Generate scripts only
+#   ./k3s-setup.ps1 -Action ConfigureOnly                   # Configure cluster only
+#   ./k3s-setup.ps1 -ConfigFile "prod.json" -Action Deploy  # Deploy with custom config
 
 param(
     [Parameter(Mandatory=$false)]
     [string]$ConfigFile = "cluster.json",
     
     [Parameter(Mandatory=$false)]
-    [bool]$SetKubectlContext = $true
+    [bool]$SetKubectlContext = $true,
+    
+    [Parameter(Mandatory=$false)]
+    [ValidateSet("Deploy", "PrepareOnly", "ProxyOnly", "MastersOnly", "WorkersOnly", "ConfigureOnly")]
+    [string]$Action = "Deploy"
 )
 
 #########################################
@@ -745,25 +756,16 @@ Storage Classes:
 "@ -ForegroundColor Cyan
 }
 
-# Script execution options
-Write-Host "`nDeployment Options:" -ForegroundColor Yellow
-Write-Host "  1. Full deployment (all components)" -ForegroundColor White
-Write-Host "  2. Prepare scripts only" -ForegroundColor White
-Write-Host "  3. Deploy proxy only" -ForegroundColor White
-Write-Host "  4. Deploy masters only" -ForegroundColor White
-Write-Host "  5. Deploy workers only" -ForegroundColor White
-Write-Host "  6. Configure cluster only" -ForegroundColor White
+# Script execution - automatically run based on Action parameter
+Write-Host "`nExecuting Action: $Action" -ForegroundColor Yellow
 
-$choice = Read-Host "`nSelect option (1-6)"
-
-switch ($choice) {
-    "1" { Start-Deployment }
-    "2" { Start-Deployment -PrepareOnly }
-    "3" { Start-Deployment -ProxyOnly }
-    "4" { Start-Deployment -MastersOnly }
-    "5" { Start-Deployment -WorkersOnly }
-    "6" { Start-Deployment -ConfigureOnly }
-    default { Write-Host "Invalid option" -ForegroundColor Red }
+switch ($Action) {
+    "Deploy" { Start-Deployment }
+    "PrepareOnly" { Start-Deployment -PrepareOnly }
+    "ProxyOnly" { Start-Deployment -ProxyOnly }
+    "MastersOnly" { Start-Deployment -MastersOnly }
+    "WorkersOnly" { Start-Deployment -WorkersOnly }
+    "ConfigureOnly" { Start-Deployment -ConfigureOnly }
 }
 
 # Cleanup function
