@@ -35,6 +35,7 @@ This repository provides a complete Infrastructure-as-Code solution for deployin
 
 - **High Availability**: 3 master nodes with automatic failover (configurable 1-N masters)
 - **No Virtual IP Required**: Uses Nginx proxy for load balancing
+- **Environment Agnostic**: Works with any SSH-accessible infrastructure (bare metal, cloud VMs, Vagrant)
 - **Integrated Storage**: NFS running on master nodes with dynamic provisioning
 - **Kubernetes Network Control**: Configure pod/service CIDRs, DNS, and networking
 - **Centralized Configuration**: JSON-based config with environment support
@@ -80,7 +81,8 @@ This repository provides a complete Infrastructure-as-Code solution for deployin
        "maxPods": 110
      },
      "ssh": {
-       "user": "ubuntu"
+       "user": "ubuntu",
+       "keyPath": "~/.ssh/id_rsa"
      }
    }
    ```
@@ -200,6 +202,9 @@ kubectl get pods -A
 ./setup/k3s-setup.ps1 -Action MastersOnly       # Deploy masters only
 ./setup/k3s-setup.ps1 -Action WorkersOnly       # Deploy workers only
 ./setup/k3s-setup.ps1 -Action ConfigureOnly     # Configure cluster only
+
+# Import kubeconfig only (for existing clusters)
+./setup/k3s-setup.ps1 -Action ImportKubeConfig -ConfigFile "cluster.json"
 
 ./operations/k3s-add-node.ps1 -NodeType worker -NewNodeIP "10.0.1.26" -ConfigFile "staging-cluster.json"
 ```

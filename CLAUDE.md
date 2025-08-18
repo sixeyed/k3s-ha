@@ -47,6 +47,9 @@ Key architectural decisions:
 ./setup/k3s-setup.ps1 -Action MastersOnly    # Deploy masters only
 ./setup/k3s-setup.ps1 -Action WorkersOnly    # Deploy workers only
 ./setup/k3s-setup.ps1 -Action ConfigureOnly  # Configure cluster only
+
+# Import kubeconfig only (for existing clusters)
+./setup/k3s-setup.ps1 -Action ImportKubeConfig -ConfigFile "cluster.json"
 ```
 
 ### Configuration Testing & Validation
@@ -59,7 +62,7 @@ Key architectural decisions:
 cd test/minimal-cluster
 ./vagrant-setup.ps1 prereqs   # Check prerequisites first
 ./vagrant-setup.ps1 up        # Start 3 VMs (checks prereqs automatically)
-pwsh ../../setup/k3s-setup.ps1 -ConfigFile test/minimal-cluster/vagrant-cluster.json  # Deploy K3s cluster (automatic)
+pwsh ../../setup/k3s-setup.ps1 -ConfigFile vagrant-cluster.json  # Deploy K3s cluster
 ./vagrant-setup.ps1 destroy   # Clean up
 
 # Deploy minimal test cluster on remote VMs
@@ -125,7 +128,7 @@ ssh ubuntu@10.0.1.10 "showmount -e localhost"
 ## Repository Structure
 
 - **setup/** - Initial deployment scripts and documentation
-  - `k3s-setup.ps1` - Main deployment automation script (renamed from k3s-complete-setup.ps1)
+  - `k3s-setup.ps1` - Main deployment automation script
   - `k3s-deployment-guide.md` - Detailed deployment instructions and troubleshooting
   - `config/` - Generated deployment configuration files (ignored by git)
   
@@ -224,6 +227,7 @@ NFS exports available:
 ## Development Guidelines
 
 When modifying scripts:
+- **Environment-Agnostic Design**: All scripts are completely environment-agnostic and work with any SSH-accessible infrastructure (bare metal, cloud VMs, Vagrant, etc.)
 - All PowerShell scripts use SSH for remote execution via helper functions  
 - Linux shell scripts are embedded as here-strings and deployed via SCP
 - Configuration is loaded from JSON files using the shared `lib/K3sCluster.psm1` module
@@ -231,8 +235,9 @@ When modifying scripts:
 - All remote operations include error handling and status reporting
 - Scripts support both automated and manual execution modes
 - Use `-ConfigFile` parameter to support multiple environments
+- **No Environment-Specific Logic**: Scripts contain no Vagrant, cloud, or bare metal specific code paths
+- SSH key paths support relative paths (resolved relative to config file location) and `~` expansion
 - Generated deployment files are stored in `setup/config/` and ignored by git
-- SSH keys for Vagrant testing are stored in `test/minimal-cluster/ssh_keys/` and ignored by git
 
 **Module Usage:**
 ```powershell

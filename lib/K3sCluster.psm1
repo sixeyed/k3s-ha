@@ -20,6 +20,15 @@ function Load-ClusterConfig {
         $sshKeyPath = $jsonContent.ssh.keyPath
         if ($sshKeyPath.StartsWith("~")) {
             $sshKeyPath = $sshKeyPath.Replace("~", $HOME)
+        } elseif (-not [System.IO.Path]::IsPathRooted($sshKeyPath)) {
+            # Convert relative path to absolute path based on current working directory
+            # since the config path might be relative too
+            $sshKeyPath = Resolve-Path $sshKeyPath -ErrorAction SilentlyContinue
+            if (-not $sshKeyPath) {
+                # If not found in current directory, try relative to config file
+                $configDir = Split-Path -Parent (Resolve-Path $ConfigPath)
+                $sshKeyPath = Join-Path $configDir $jsonContent.ssh.keyPath
+            }
         }
         
         # Generate token if not provided
@@ -79,6 +88,59 @@ function Load-ClusterConfig {
     }
 }
 
+# Helper function to get the correct SSH key for a node
+function Get-SSHKeyForNode {
+    param(
+        [Parameter(Mandatory=$true)]
+        [hashtable]$Config,
+        [Parameter(Mandatory=$true)]
+        [string]$Node
+    )
+    
+    # Get base key info
+    $baseKeyPath = $Config.SSHKeyPath
+    $keyDir = Split-Path -Parent $baseKeyPath
+    $fullKeyName = Split-Path -Leaf $baseKeyPath
+    
+    # Extract the base key name by removing any existing role suffix
+    # For example: vagrant_rsa_k3s-master-1 -> vagrant_rsa
+    $baseKeyName = $fullKeyName
+    if ($fullKeyName -match "^(.+)_k3s-(master|worker|proxy)(-\d+)?$") {
+        $baseKeyName = $matches[1]
+    }
+    
+    # Determine node role and create priority list of keys to try
+    $keysToTry = @($baseKeyPath)  # Start with configured key
+    
+    # Add role-based keys
+    if ($Node -eq $Config.ProxyIP) {
+        $keysToTry += Join-Path $keyDir "${baseKeyName}_k3s-proxy"
+    } elseif ($Config.MasterIPs -contains $Node) {
+        $masterIndex = $Config.MasterIPs.IndexOf($Node) + 1
+        $keysToTry += Join-Path $keyDir "${baseKeyName}_k3s-master-$masterIndex"
+    } elseif ($Config.WorkerIPs -contains $Node) {
+        $workerIndex = $Config.WorkerIPs.IndexOf($Node) + 1
+        $keysToTry += Join-Path $keyDir "${baseKeyName}_k3s-worker-$workerIndex"
+    }
+    
+    # Add IP-based key
+    $keysToTry += Join-Path $keyDir "${baseKeyName}_${Node}"
+    
+    # Try each key until one works
+    foreach ($keyPath in $keysToTry) {
+        if (Test-Path $keyPath) {
+            # Test if key works with a simple command
+            $null = ssh -i $keyPath -o StrictHostKeyChecking=no -o ConnectTimeout=3 -o BatchMode=yes "$($Config.SSHUser)@$Node" "exit" 2>&1
+            if ($LASTEXITCODE -eq 0) {
+                return $keyPath
+            }
+        }
+    }
+    
+    # If nothing worked, return the original key
+    return $baseKeyPath
+}
+
 function Get-SSHCommand {
     param(
         [Parameter(Mandatory=$true)]
@@ -89,7 +151,8 @@ function Get-SSHCommand {
         [string]$Command
     )
     
-    ssh -i $Config.SSHKeyPath -o StrictHostKeyChecking=no "$($Config.SSHUser)@$Node" $Command
+    $sshKey = Get-SSHKeyForNode -Config $Config -Node $Node
+    ssh -i $sshKey -o StrictHostKeyChecking=no "$($Config.SSHUser)@$Node" $Command
 }
 
 function Copy-FileToNode {
@@ -104,31 +167,8 @@ function Copy-FileToNode {
         [string]$RemotePath
     )
     
-    # Check if we're in a Vagrant environment
-    if (Test-Path "Vagrantfile") {
-        # Use Vagrant to copy files - we need to determine the VM name based on IP
-        $vmName = Get-VagrantVMName -IPAddress $Node
-        if ($vmName) {
-            # Copy to vagrant shared folder first, then move to target location inside VM
-            $fileName = Split-Path -Leaf $LocalPath
-            $localSharedPath = "./temp_$fileName"  # Local path to copy to current directory with unique name
-            $sharedPath = "/vagrant/temp_$fileName"  # Path inside VM
-            
-            # Copy file to current directory with temp name (will be available in VM at /vagrant)
-            Copy-Item $LocalPath $localSharedPath -Force
-            
-            # Move file inside VM to target location
-            vagrant ssh $vmName -c "sudo cp '$sharedPath' '$RemotePath' && sudo chmod +x '$RemotePath'"
-            
-            # Clean up temp file
-            Remove-Item $localSharedPath -Force -ErrorAction SilentlyContinue
-        } else {
-            Write-Host "Warning: Could not determine Vagrant VM name for IP $Node, using direct SSH" -ForegroundColor Yellow
-            scp -i $Config.SSHKeyPath -o StrictHostKeyChecking=no $LocalPath "$($Config.SSHUser)@$Node`:$RemotePath"
-        }
-    } else {
-        scp -i $Config.SSHKeyPath -o StrictHostKeyChecking=no $LocalPath "$($Config.SSHUser)@$Node`:$RemotePath"
-    }
+    $sshKey = Get-SSHKeyForNode -Config $Config -Node $Node
+    scp -i $sshKey -o StrictHostKeyChecking=no $LocalPath "$($Config.SSHUser)@$Node`:$RemotePath"
 }
 
 function Copy-FileFromNode {
@@ -143,31 +183,8 @@ function Copy-FileFromNode {
         [string]$LocalPath
     )
     
-    # Check if we're in a Vagrant environment
-    if (Test-Path "Vagrantfile") {
-        # Use Vagrant to copy files - we need to determine the VM name based on IP
-        $vmName = Get-VagrantVMName -IPAddress $Node
-        if ($vmName) {
-            # Copy to vagrant shared folder first, then get it locally
-            $fileName = Split-Path -Leaf $RemotePath
-            $sharedPath = "/vagrant/temp_$fileName"
-            $localSharedPath = "./temp_$fileName"
-            
-            # Copy from remote path to shared folder inside VM
-            vagrant ssh $vmName -c "sudo cp '$RemotePath' '$sharedPath'"
-            
-            # Copy from shared folder to local path
-            Copy-Item $localSharedPath $LocalPath -Force
-            
-            # Clean up temp file
-            Remove-Item $localSharedPath -Force -ErrorAction SilentlyContinue
-        } else {
-            Write-Host "Warning: Could not determine Vagrant VM name for IP $Node, using direct SSH" -ForegroundColor Yellow
-            scp -i $Config.SSHKeyPath -o StrictHostKeyChecking=no "$($Config.SSHUser)@$Node`:$RemotePath" $LocalPath
-        }
-    } else {
-        scp -i $Config.SSHKeyPath -o StrictHostKeyChecking=no "$($Config.SSHUser)@$Node`:$RemotePath" $LocalPath
-    }
+    $sshKey = Get-SSHKeyForNode -Config $Config -Node $Node
+    scp -i $sshKey -o StrictHostKeyChecking=no "$($Config.SSHUser)@$Node`:$RemotePath" $LocalPath
 }
 
 # Helper function for backwards compatibility - wraps Get-SSHCommand
@@ -181,37 +198,9 @@ function Invoke-SSHCommand {
         [string]$Command
     )
     
-    # Check if we're in a Vagrant environment
-    if (Test-Path "Vagrantfile") {
-        # Use Vagrant SSH command
-        $vmName = Get-VagrantVMName -IPAddress $Node
-        if ($vmName) {
-            # Properly quote the command for vagrant ssh
-            vagrant ssh $vmName -c "$Command"
-        } else {
-            Write-Host "Warning: Could not determine Vagrant VM name for IP $Node, using direct SSH" -ForegroundColor Yellow
-            Get-SSHCommand -Config $Config -Node $Node -Command $Command
-        }
-    } else {
-        Get-SSHCommand -Config $Config -Node $Node -Command $Command
-    }
+    Get-SSHCommand -Config $Config -Node $Node -Command $Command
 }
 
-# Function to get Vagrant VM name based on IP address
-function Get-VagrantVMName {
-    param(
-        [Parameter(Mandatory=$true)]
-        [string]$IPAddress
-    )
-    
-    # Map IP addresses to VM names based on our Vagrantfile configuration
-    switch ($IPAddress) {
-        "192.168.56.100" { return "k3s-proxy" }
-        "192.168.56.10" { return "k3s-master-1" }
-        "192.168.56.20" { return "k3s-worker-1" }
-        default { return $null }
-    }
-}
 
 # Function to build K3s server arguments based on configuration
 function Get-K3sServerArgs {
@@ -244,8 +233,27 @@ function Get-K3sServerArgs {
         $args += "--kubelet-arg=max-pods=$($Config.MaxPods)"
     }
     
-    # TLS SANs
-    foreach ($san in $Config.TLSSans) {
+    # TLS SANs - automatically include proxy IP and master IPs
+    $tlsSans = @()
+    
+    # Add proxy IP if it exists
+    if ($Config.ProxyIP) {
+        $tlsSans += $Config.ProxyIP
+    }
+    
+    # Add master IPs
+    if ($Config.MasterIPs) {
+        $tlsSans += $Config.MasterIPs
+    }
+    
+    # Add custom TLS SANs from config
+    if ($Config.TLSSans) {
+        $tlsSans += $Config.TLSSans
+    }
+    
+    # Remove duplicates and add to args
+    $tlsSans = $tlsSans | Sort-Object -Unique
+    foreach ($san in $tlsSans) {
         $args += "--tls-san=$san"
     }
     
@@ -300,4 +308,4 @@ function Get-K3sAgentArgs {
 }
 
 # Export functions
-Export-ModuleMember -Function Load-ClusterConfig, Get-SSHCommand, Copy-FileToNode, Copy-FileFromNode, Invoke-SSHCommand, Get-K3sServerArgs, Get-K3sAgentArgs
+Export-ModuleMember -Function Load-ClusterConfig, Get-SSHCommand, Copy-FileToNode, Copy-FileFromNode, Invoke-SSHCommand, Get-K3sServerArgs, Get-K3sAgentArgs, Get-SSHKeyForNode

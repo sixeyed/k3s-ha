@@ -25,11 +25,11 @@
     "nfsMountPath": "/data/nfs"
   },
   "ssh": {
-    "user": "vagrant",
-    "keyPath": "ssh_keys/vagrant_rsa"
+    "user": "vagrant", 
+    "keyPath": "ssh_keys/vagrant_rsa_k3s-master-1"
   },
   "k3s": {
-    "token": null,
+    "token": "k3s-ha-token-887061",
     "disableServices": ["traefik"],
     "tlsSans": [],
     "extraArgs": {

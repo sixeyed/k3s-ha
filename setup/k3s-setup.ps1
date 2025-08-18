@@ -6,6 +6,7 @@
 #   ./k3s-setup.ps1 -Action Deploy                          # Same as above (explicit)
 #   ./k3s-setup.ps1 -Action PrepareOnly                     # Generate scripts only
 #   ./k3s-setup.ps1 -Action ConfigureOnly                   # Configure cluster only
+#   ./k3s-setup.ps1 -Action ImportKubeConfig                # Import existing cluster kubeconfig
 #   ./k3s-setup.ps1 -ConfigFile "prod.json" -Action Deploy  # Deploy with custom config
 
 param(
@@ -16,7 +17,7 @@ param(
     [bool]$SetKubectlContext = $true,
     
     [Parameter(Mandatory=$false)]
-    [ValidateSet("Deploy", "PrepareOnly", "ProxyOnly", "MastersOnly", "WorkersOnly", "ConfigureOnly")]
+    [ValidateSet("Deploy", "PrepareOnly", "ProxyOnly", "MastersOnly", "WorkersOnly", "ConfigureOnly", "ImportKubeConfig")]
     [string]$Action = "Deploy"
 )
 
@@ -32,6 +33,18 @@ Write-Host "Loading configuration from: $ConfigFile" -ForegroundColor Cyan
 $Config = Load-ClusterConfig -ConfigPath $ConfigFile
 
 # Helper functions (now using shared module functions)
+
+function Get-NetworkSubnet {
+    param([string]$IPAddress)
+    
+    # Calculate /24 network subnet from IP address
+    $octets = $IPAddress.Split('.')
+    if ($octets.Count -eq 4) {
+        return "$($octets[0]).$($octets[1]).$($octets[2]).0/24"
+    } else {
+        throw "Invalid IP address format: $IPAddress"
+    }
+}
 
 #########################################
 # NGINX PROXY CONFIGURATION
@@ -86,7 +99,7 @@ http {
             stub_status on;
             access_log off;
             allow 127.0.0.1;
-            allow 10.0.1.0/24;
+            allow NETWORK_SUBNET;
             deny all;
         }
     }
@@ -178,6 +191,7 @@ K3S_VERSION=$4
 STORAGE_DEVICE=$5
 NFS_MOUNT_PATH=$6
 K3S_SERVER_ARGS="$7"
+NETWORK_SUBNET="$8"
 
 echo "Setting up K3s Master Node $MASTER_NUMBER"
 
@@ -228,9 +242,9 @@ fi
 
 # Configure NFS exports
 cat > /etc/exports << EOF
-$NFS_MOUNT_PATH/shared  10.0.1.0/24(rw,sync,no_subtree_check,no_root_squash)
-$NFS_MOUNT_PATH/data    10.0.1.0/24(rw,sync,no_subtree_check,no_root_squash)
-$NFS_MOUNT_PATH/backups 10.0.1.0/24(rw,sync,no_subtree_check,no_root_squash)
+$NFS_MOUNT_PATH/shared  $NETWORK_SUBNET(rw,sync,no_subtree_check,no_root_squash)
+$NFS_MOUNT_PATH/data    $NETWORK_SUBNET(rw,sync,no_subtree_check,no_root_squash)
+$NFS_MOUNT_PATH/backups $NETWORK_SUBNET(rw,sync,no_subtree_check,no_root_squash)
 EOF
 
 # Start NFS server
@@ -461,7 +475,9 @@ function Deploy-Scripts {
     $masterServers = $masterServers.TrimEnd("`n")
     
     # Prepare Nginx config with actual IPs
+    $networkSubnet = Get-NetworkSubnet -IPAddress $Config.ProxyIP
     $NginxConfigFinal = $NginxConfig -replace '###MASTER_SERVERS###', $masterServers
+    $NginxConfigFinal = $NginxConfigFinal -replace 'NETWORK_SUBNET', $networkSubnet
     
     # Prepare proxy setup script
     $ProxySetupFinal = $ProxySetupScript -replace '###NGINX_CONFIG###', $NginxConfigFinal
@@ -540,7 +556,8 @@ function Setup-MasterNodes {
         $chmodCmd = "chmod +x /tmp/setup-master.sh"
         Invoke-SSHCommand -Config $Config -Node $masterIP -Command $chmodCmd
         
-        $setupCmd = "sudo /tmp/setup-master.sh $masterNumber $($Config.MasterIPs[0]) $($Config.K3sToken) $($Config.K3sVersion) $($Config.StorageDevice) $($Config.NFSMountPath) '$k3sServerArgs'"
+        $networkSubnet = Get-NetworkSubnet -IPAddress $Config.MasterIPs[0]
+        $setupCmd = "sudo /tmp/setup-master.sh $masterNumber $($Config.MasterIPs[0]) $($Config.K3sToken) $($Config.K3sVersion) $($Config.StorageDevice) $($Config.NFSMountPath) '$k3sServerArgs' '$networkSubnet'"
         Invoke-SSHCommand -Config $Config -Node $masterIP -Command $setupCmd
         
         if ($i -eq 0) {
@@ -586,72 +603,189 @@ function Setup-WorkerNodes {
 function Configure-Cluster {
     Write-Host "`n=== Configuring Cluster ===" -ForegroundColor Green
     
-    # Get kubeconfig from first master
-    $kubeconfigPath = "$HOME\.kube\k3s-config"
-    New-Item -ItemType Directory -Force -Path "$HOME\.kube" | Out-Null
+    # Wait for cluster to be fully ready
+    Write-Host "Waiting for cluster to be ready..." -ForegroundColor Yellow
+    Start-Sleep -Seconds 30
+    
+    # Get kubeconfig from first master with retry logic
+    $kubeconfigPath = Join-Path $HOME ".kube" "k3s-config"
+    New-Item -ItemType Directory -Force -Path (Join-Path $HOME ".kube") | Out-Null
     
     Write-Host "Retrieving kubeconfig..." -ForegroundColor Yellow
-    Copy-FileFromNode -Config $Config -Node $Config.MasterIPs[0] -RemotePath "/etc/rancher/k3s/k3s.yaml" -LocalPath $kubeconfigPath
     
-    # Update kubeconfig to use proxy
-    $kubeconfig = Get-Content $kubeconfigPath -Raw
-    $kubeconfig = $kubeconfig -replace 'https://127.0.0.1:6443', "https://$($Config.ProxyIP):6443"
-    $kubeconfig | Set-Content $kubeconfigPath
+    # Always remove existing kubeconfig to force fresh retrieval
+    if (Test-Path $kubeconfigPath) {
+        Remove-Item $kubeconfigPath -Force
+        Write-Host "  • Removed existing kubeconfig to force fresh retrieval" -ForegroundColor Gray
+    }
+    
+    $maxRetries = 3
+    $retryCount = 0
+    $success = $false
+    
+    while ($retryCount -lt $maxRetries -and -not $success) {
+        try {
+            Copy-FileFromNode -Config $Config -Node $Config.MasterIPs[0] -RemotePath "/etc/rancher/k3s/k3s.yaml" -LocalPath $kubeconfigPath
+            
+            # Verify the kubeconfig was retrieved successfully
+            if (Test-Path $kubeconfigPath) {
+                $kubeconfigContent = Get-Content $kubeconfigPath -Raw
+                if ($kubeconfigContent -and $kubeconfigContent.Contains("certificate-authority-data")) {
+                    $success = $true
+                    Write-Host "✓ Kubeconfig retrieved successfully" -ForegroundColor Green
+                } else {
+                    throw "Invalid kubeconfig content"
+                }
+            } else {
+                throw "Kubeconfig file not found"
+            }
+        }
+        catch {
+            $retryCount++
+            Write-Host "⚠ Attempt $retryCount failed: $($_.Exception.Message)" -ForegroundColor Yellow
+            if ($retryCount -lt $maxRetries) {
+                Write-Host "  Waiting 10 seconds before retry..." -ForegroundColor Yellow
+                Start-Sleep -Seconds 10
+            }
+        }
+    }
+    
+    if (-not $success) {
+        throw "Failed to retrieve kubeconfig after $maxRetries attempts"
+    }
     
     # Configure kubectl context if requested
     if ($SetKubectlContext) {
         Write-Host "Configuring kubectl context..." -ForegroundColor Yellow
         
-        # Generate context name based on cluster name and proxy IP
-        $contextName = "$($Config.ClusterName)-$($Config.ProxyIP)"
-        $clusterName = "$($Config.ClusterName)-cluster"
-        $userName = "$($Config.ClusterName)-admin"
+        # Update kubeconfig to use proxy endpoint instead of localhost
+        $kubeconfig = Get-Content $kubeconfigPath -Raw
+        $kubeconfig = $kubeconfig -replace 'https://127\.0\.0\.1:6443', "https://$($Config.ProxyIP):6443"
+        $kubeconfig = $kubeconfig -replace 'https://[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:6443', "https://$($Config.ProxyIP):6443"
+        $kubeconfig | Set-Content $kubeconfigPath
+        Write-Host "✓ Updated kubeconfig to use proxy endpoint: https://$($Config.ProxyIP):6443" -ForegroundColor Green
         
-        # Load the k3s-config as YAML
+        # Generate cluster-specific context name
+        $contextName = "$($Config.ClusterName)-$($Config.ProxyIP)"
+        $clusterName = "$($Config.ClusterName)-$($Config.ProxyIP)"
+        $userName = "$($Config.ClusterName)-$($Config.ProxyIP)"
+        
+        # Update context names using TARGETED replacements that avoid certificate data
         $kconfigContent = Get-Content $kubeconfigPath -Raw
         
-        # Replace context name
-        $kconfigContent = $kconfigContent -replace '  name: default\s*\n\s*current-context:', "  name: $contextName`ncurrent-context:"
+        # Only replace "default" when it appears in specific YAML structure contexts
+        # Use very specific patterns that won't match certificate data (multiline mode)
+        $kconfigContent = $kconfigContent -replace '(?m)^(\s*- name:\s*)default$', "`${1}$userName"
+        $kconfigContent = $kconfigContent -replace '(?m)^(\s*name:\s*)default$', "`${1}$clusterName" 
+        $kconfigContent = $kconfigContent -replace '(?m)^(\s*current-context:\s*)default$', "`${1}$contextName"  
+        $kconfigContent = $kconfigContent -replace '(?m)^(\s*cluster:\s*)default$', "`${1}$clusterName"
+        $kconfigContent = $kconfigContent -replace '(?m)^(\s*user:\s*)default$', "`${1}$userName"
         
-        # Replace current-context
-        $kconfigContent = $kconfigContent -replace 'current-context: default', "current-context: $contextName"
-        
-        # Replace cluster references in contexts section
-        $kconfigContent = $kconfigContent -replace 'cluster: default', "cluster: $clusterName"
-        
-        # Replace user references in contexts section
-        $kconfigContent = $kconfigContent -replace 'user: default', "user: $userName"
-        
-        # Replace cluster name in clusters section
-        $kconfigContent = $kconfigContent -replace '(clusters:[\s\S]*?)name: default', "`$1name: $clusterName"
-        
-        # Replace user name in users section
-        $kconfigContent = $kconfigContent -replace '(users:[\s\S]*?)name: default', "`$1name: $userName"
-        
-        # Save modified config
+        # Save the carefully modified config
         $kconfigContent | Set-Content $kubeconfigPath
+        Write-Host "✓ Updated context names in kubeconfig" -ForegroundColor Green
+        Write-Host "  • Context name: $contextName" -ForegroundColor Green
         
-        # Now merge with existing config if it exists
-        if (Test-Path "$env:HOME/.kube/config") {
-            # Backup existing config
-            Copy-Item "$env:HOME/.kube/config" "$env:HOME/.kube/config.backup" -Force
-            
-            # Merge configs
-            $env:KUBECONFIG = "$env:HOME/.kube/config:$kubeconfigPath"
-            kubectl config view --flatten > "$env:HOME/.kube/config-merged"
-            Move-Item "$env:HOME/.kube/config-merged" "$env:HOME/.kube/config" -Force
+        # Always merge into the standard kubeconfig location
+        $standardKubeconfigPath = "$env:HOME/.kube/config"
+        
+        # Remove any existing context with the same name to avoid conflicts
+        if (Test-Path $standardKubeconfigPath) {
+            try {
+                # Backup existing config
+                Copy-Item $standardKubeconfigPath "$env:HOME/.kube/config.backup.$(Get-Date -Format 'yyyyMMdd-HHmmss')" -Force
+                Write-Host "  • Backed up existing kubeconfig" -ForegroundColor Gray
+                
+                # Remove ALL existing entries that could conflict with this cluster
+                $clusterBaseName = $Config.ClusterName
+                
+                # Remove entries by server URL (most reliable method)
+                Write-Host "  • Removing any existing entries for server: https://$($Config.ProxyIP):6443" -ForegroundColor Gray
+                
+                # Get list of existing clusters that use the same server
+                $existingClusters = kubectl config get-clusters -o name 2>&1 | Where-Object { $_ -notmatch "error" }
+                foreach ($cluster in $existingClusters) {
+                    $clusterInfo = kubectl config view -o json 2>&1 | ConvertFrom-Json
+                    if ($clusterInfo.clusters) {
+                        $matchingCluster = $clusterInfo.clusters | Where-Object { 
+                            $_.cluster.server -eq "https://$($Config.ProxyIP):6443" 
+                        }
+                        if ($matchingCluster) {
+                            Write-Host "  • Removing cluster: $($matchingCluster.name)" -ForegroundColor Gray
+                            kubectl config delete-cluster $matchingCluster.name 2>&1 | Out-Null
+                            
+                            # Also remove any contexts and users that reference this cluster
+                            if ($clusterInfo.contexts) {
+                                $clusterInfo.contexts | Where-Object { $_.context.cluster -eq $matchingCluster.name } | ForEach-Object {
+                                    Write-Host "  • Removing context: $($_.name)" -ForegroundColor Gray
+                                    kubectl config delete-context $_.name 2>&1 | Out-Null
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                # Also remove common naming patterns as fallback
+                $possibleNames = @($contextName, "$clusterBaseName-$($Config.ProxyIP)", $clusterBaseName, "default")
+                foreach ($name in $possibleNames) {
+                    kubectl config delete-context $name 2>&1 | Out-Null
+                    kubectl config delete-cluster $name 2>&1 | Out-Null  
+                    kubectl config delete-user $name 2>&1 | Out-Null
+                }
+                Write-Host "  • Removed any existing entries for this cluster" -ForegroundColor Gray
+            }
+            catch {
+                Write-Host "  • No existing entries to remove" -ForegroundColor Gray
+            }
+        }
+        
+        # Merge the new kubeconfig
+        Write-Host "Merging kubeconfig into standard location..." -ForegroundColor Yellow
+        
+        # Clear and reset KUBECONFIG to ensure fresh file reading  
+        $env:KUBECONFIG = $null
+        Start-Sleep -Milliseconds 500
+        
+        # Use Unix-style paths for KUBECONFIG (kubectl expects Unix format even on Windows)
+        $unixStandardPath = $standardKubeconfigPath -replace '\\', '/'
+        $unixKubeconfigPath = $kubeconfigPath -replace '\\', '/'
+        $env:KUBECONFIG = "${unixStandardPath}:${unixKubeconfigPath}"
+        
+        Write-Host "  • Using KUBECONFIG: $($env:KUBECONFIG)" -ForegroundColor Gray
+        
+        kubectl config view --flatten | Out-File -FilePath "$env:HOME/.kube/config-merged" -Encoding UTF8
+        
+        # Verify the merge worked and fix current-context if needed
+        if (Test-Path "$env:HOME/.kube/config-merged") {
+            $mergedContent = Get-Content "$env:HOME/.kube/config-merged" -Raw
+            if ($mergedContent -and $mergedContent.Contains($contextName)) {
+                # Fix current-context to match the new context name
+                $mergedContent = $mergedContent -replace "current-context: .*", "current-context: $contextName"
+                $mergedContent | Set-Content "$env:HOME/.kube/config-merged"
+                
+                Move-Item "$env:HOME/.kube/config-merged" $standardKubeconfigPath -Force
+                Write-Host "  • Successfully merged kubeconfig into ~/.kube/config" -ForegroundColor Green
+                Write-Host "  • Set current-context to: $contextName" -ForegroundColor Green
+            } else {
+                throw "Kubeconfig merge failed - context '$contextName' not found in merged config"
+            }
         } else {
-            # If no existing config, just copy our file
-            Copy-Item $kubeconfigPath "$env:HOME/.kube/config" -Force
+            throw "Kubeconfig merge failed - merged file not created"
         }
         
         # Switch to the new context
-        $env:KUBECONFIG = "$env:HOME/.kube/config"
+        $env:KUBECONFIG = $standardKubeconfigPath
         kubectl config use-context $contextName
         
         Write-Host "✓ Kubectl context '$contextName' configured and set as current" -ForegroundColor Green
         Write-Host "  You can now use 'kubectl get nodes' directly" -ForegroundColor Cyan
     } else {
+        # Just update kubeconfig to use proxy but don't merge
+        $kubeconfig = Get-Content $kubeconfigPath -Raw
+        $kubeconfig = $kubeconfig -replace 'https://127\.0\.0\.1:6443', "https://$($Config.ProxyIP):6443"
+        $kubeconfig = $kubeconfig -replace 'https://[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:6443', "https://$($Config.ProxyIP):6443"
+        $kubeconfig | Set-Content $kubeconfigPath
+        
         $env:KUBECONFIG = $kubeconfigPath
         Write-Host "  Use: export KUBECONFIG=$kubeconfigPath" -ForegroundColor Cyan
     }
@@ -665,6 +799,203 @@ function Configure-Cluster {
     kubectl rollout status deployment/nfs-client-provisioner -n nfs-provisioner
     
     Write-Host "Cluster configuration complete!" -ForegroundColor Green
+}
+
+# Function to import kubeconfig only
+function Import-KubeConfig {
+    Write-Host "`n=== Importing Kubeconfig ===" -ForegroundColor Green
+    
+    # Get kubeconfig from first master with retry logic
+    $kubeconfigPath = Join-Path $HOME ".kube" "k3s-config"
+    New-Item -ItemType Directory -Force -Path (Join-Path $HOME ".kube") | Out-Null
+    
+    Write-Host "Retrieving kubeconfig from master..." -ForegroundColor Yellow
+    
+    # Always remove existing kubeconfig to force fresh retrieval
+    if (Test-Path $kubeconfigPath) {
+        Remove-Item $kubeconfigPath -Force
+        Write-Host "  • Removed existing kubeconfig to force fresh retrieval" -ForegroundColor Gray
+    }
+    
+    $maxRetries = 3
+    $retryCount = 0
+    $success = $false
+    
+    while ($retryCount -lt $maxRetries -and -not $success) {
+        try {
+            Copy-FileFromNode -Config $Config -Node $Config.MasterIPs[0] -RemotePath "/etc/rancher/k3s/k3s.yaml" -LocalPath $kubeconfigPath
+            
+            # Verify the kubeconfig was retrieved successfully
+            if (Test-Path $kubeconfigPath) {
+                $kubeconfigContent = Get-Content $kubeconfigPath -Raw
+                if ($kubeconfigContent -and $kubeconfigContent.Contains("certificate-authority-data")) {
+                    $success = $true
+                    Write-Host "✓ Kubeconfig retrieved successfully" -ForegroundColor Green
+                } else {
+                    throw "Invalid kubeconfig content"
+                }
+            } else {
+                throw "Kubeconfig file not found"
+            }
+        }
+        catch {
+            $retryCount++
+            Write-Host "⚠ Attempt $retryCount failed: $($_.Exception.Message)" -ForegroundColor Yellow
+            if ($retryCount -lt $maxRetries) {
+                Write-Host "  Waiting 10 seconds before retry..." -ForegroundColor Yellow
+                Start-Sleep -Seconds 10
+            }
+        }
+    }
+    
+    if (-not $success) {
+        throw "Failed to retrieve kubeconfig after $maxRetries attempts"
+    }
+    
+    # Update kubeconfig to use proxy (handle multiple possible server addresses)
+    $kubeconfig = Get-Content $kubeconfigPath -Raw
+    $kubeconfig = $kubeconfig -replace 'https://127\.0\.0\.1:6443', "https://$($Config.ProxyIP):6443"
+    $kubeconfig = $kubeconfig -replace 'https://[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:6443', "https://$($Config.ProxyIP):6443"
+    $kubeconfig | Set-Content $kubeconfigPath
+    Write-Host "✓ Updated kubeconfig to use proxy endpoint: https://$($Config.ProxyIP):6443" -ForegroundColor Green
+    
+    # Configure kubectl context
+    Write-Host "Configuring kubectl context..." -ForegroundColor Yellow
+    
+    # Generate context name based on cluster name and proxy IP
+    $contextName = "$($Config.ClusterName)-$($Config.ProxyIP)"
+    $clusterName = "$($Config.ClusterName)-$($Config.ProxyIP)"
+    $userName = "$($Config.ClusterName)-$($Config.ProxyIP)"
+    
+    # Load the k3s-config as YAML and update names
+    $kconfigContent = Get-Content $kubeconfigPath -Raw
+    
+    # Use TARGETED string replacements that avoid certificate data corruption
+    # Only replace "default" when it appears in specific YAML structure contexts
+    $kconfigContent = $kconfigContent -replace '(?m)^(\s*- name:\s*)default$', "`${1}$userName"
+    $kconfigContent = $kconfigContent -replace '(?m)^(\s*name:\s*)default$', "`${1}$clusterName" 
+    $kconfigContent = $kconfigContent -replace '(?m)^(\s*current-context:\s*)default$', "`${1}$contextName"  
+    $kconfigContent = $kconfigContent -replace '(?m)^(\s*cluster:\s*)default$', "`${1}$clusterName"
+    $kconfigContent = $kconfigContent -replace '(?m)^(\s*user:\s*)default$', "`${1}$userName"
+    
+    # Save modified config
+    $kconfigContent | Set-Content $kubeconfigPath
+    Write-Host "✓ Updated context names in kubeconfig" -ForegroundColor Green
+    
+    # Verify the context name was updated correctly
+    $updatedConfig = Get-Content $kubeconfigPath -Raw
+    if ($updatedConfig.Contains($contextName)) {
+        Write-Host "  • Verified context name updated to: $contextName" -ForegroundColor Green
+    } else {
+        throw "Failed to update context name to '$contextName' in kubeconfig"
+    }
+    
+    # Always merge into the standard kubeconfig location
+    $standardKubeconfigPath = "$env:HOME/.kube/config"
+    
+    # Remove any existing context with the same name to avoid conflicts
+    if (Test-Path $standardKubeconfigPath) {
+        try {
+            # Backup existing config
+            Copy-Item $standardKubeconfigPath "$env:HOME/.kube/config.backup.$(Get-Date -Format 'yyyyMMdd-HHmmss')" -Force
+            Write-Host "  • Backed up existing kubeconfig" -ForegroundColor Gray
+            
+            # Remove ALL existing entries that could conflict with this cluster
+            $clusterBaseName = $Config.ClusterName
+            
+            # Remove entries by server URL (most reliable method)
+            Write-Host "  • Removing any existing entries for server: https://$($Config.ProxyIP):6443" -ForegroundColor Gray
+            
+            # Get list of existing clusters that use the same server
+            $existingClusters = kubectl config get-clusters -o name 2>&1 | Where-Object { $_ -notmatch "error" }
+            foreach ($cluster in $existingClusters) {
+                $clusterInfo = kubectl config view -o json 2>&1 | ConvertFrom-Json
+                if ($clusterInfo.clusters) {
+                    $matchingCluster = $clusterInfo.clusters | Where-Object { 
+                        $_.cluster.server -eq "https://$($Config.ProxyIP):6443" 
+                    }
+                    if ($matchingCluster) {
+                        Write-Host "  • Removing cluster: $($matchingCluster.name)" -ForegroundColor Gray
+                        kubectl config delete-cluster $matchingCluster.name 2>&1 | Out-Null
+                        
+                        # Also remove any contexts and users that reference this cluster
+                        if ($clusterInfo.contexts) {
+                            $clusterInfo.contexts | Where-Object { $_.context.cluster -eq $matchingCluster.name } | ForEach-Object {
+                                Write-Host "  • Removing context: $($_.name)" -ForegroundColor Gray
+                                kubectl config delete-context $_.name 2>&1 | Out-Null
+                            }
+                        }
+                    }
+                }
+            }
+            
+            # Also remove common naming patterns as fallback
+            $possibleNames = @($contextName, "$clusterBaseName-$($Config.ProxyIP)", $clusterBaseName, "default")
+            foreach ($name in $possibleNames) {
+                kubectl config delete-context $name 2>&1 | Out-Null
+                kubectl config delete-cluster $name 2>&1 | Out-Null  
+                kubectl config delete-user $name 2>&1 | Out-Null
+            }
+            Write-Host "  • Removed any existing entries for this cluster" -ForegroundColor Gray
+        }
+        catch {
+            Write-Host "  • No existing entries to remove" -ForegroundColor Gray
+        }
+    }
+    
+    # Merge the new kubeconfig
+    Write-Host "Merging kubeconfig into standard location..." -ForegroundColor Yellow
+    
+    # Clear and reset KUBECONFIG to ensure fresh file reading  
+    $env:KUBECONFIG = $null
+    Start-Sleep -Milliseconds 500
+    
+    # Use Unix-style paths for KUBECONFIG (kubectl expects Unix format even on Windows)
+    $unixStandardPath = $standardKubeconfigPath -replace '\\', '/'
+    $unixKubeconfigPath = $kubeconfigPath -replace '\\', '/'
+    $env:KUBECONFIG = "${unixStandardPath}:${unixKubeconfigPath}"
+    
+    Write-Host "  • Using KUBECONFIG: $($env:KUBECONFIG)" -ForegroundColor Gray
+    
+    kubectl config view --flatten | Out-File -FilePath "$env:HOME/.kube/config-merged" -Encoding UTF8
+    
+    # Verify the merge worked and fix current-context if needed
+    if (Test-Path "$env:HOME/.kube/config-merged") {
+        $mergedContent = Get-Content "$env:HOME/.kube/config-merged" -Raw
+        if ($mergedContent -and $mergedContent.Contains($contextName)) {
+            # Fix current-context to match the new context name
+            $mergedContent = $mergedContent -replace "current-context: .*", "current-context: $contextName"
+            $mergedContent | Set-Content "$env:HOME/.kube/config-merged"
+            
+            Move-Item "$env:HOME/.kube/config-merged" $standardKubeconfigPath -Force
+            Write-Host "  • Successfully merged kubeconfig into ~/.kube/config" -ForegroundColor Green
+            Write-Host "  • Set current-context to: $contextName" -ForegroundColor Green
+        } else {
+            throw "Kubeconfig merge failed - context '$contextName' not found in merged config"
+        }
+    } else {
+        throw "Kubeconfig merge failed - merged file not created"
+    }
+    
+    # Switch to the new context
+    $env:KUBECONFIG = $standardKubeconfigPath
+    kubectl config use-context $contextName
+    
+    Write-Host "✓ Kubectl context '$contextName' configured and set as current" -ForegroundColor Green
+    Write-Host "✓ Kubeconfig import complete!" -ForegroundColor Green
+    
+    # Test the connection
+    Write-Host "`nTesting connection..." -ForegroundColor Yellow
+    $testOutput = kubectl get nodes --request-timeout=10s 2>&1
+    if ($LASTEXITCODE -eq 0) {
+        Write-Host "✓ Successfully connected to cluster!" -ForegroundColor Green
+        Write-Host $testOutput
+    }
+    else {
+        Write-Host "⚠ Connection test failed!" -ForegroundColor Yellow
+        Write-Host "  Error: $testOutput" -ForegroundColor Red
+        Write-Host "  You may need to check that the cluster is running and accessible" -ForegroundColor Yellow
+    }
 }
 
 # Function to verify cluster
@@ -739,7 +1070,7 @@ function Start-Deployment {
     Write-Host @"
 
 Cluster Access:
-  kubectl --kubeconfig=$HOME\.kube\k3s-config get nodes
+  kubectl get nodes
 
 Proxy Status Page:
   http://$($Config.ProxyIP)/
@@ -766,6 +1097,7 @@ switch ($Action) {
     "MastersOnly" { Start-Deployment -MastersOnly }
     "WorkersOnly" { Start-Deployment -WorkersOnly }
     "ConfigureOnly" { Start-Deployment -ConfigureOnly }
+    "ImportKubeConfig" { Import-KubeConfig }
 }
 
 # Cleanup function
