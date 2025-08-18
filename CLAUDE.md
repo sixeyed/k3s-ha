@@ -33,10 +33,10 @@ Key architectural decisions:
 ### Initial Deployment
 ```powershell
 # Full cluster deployment with default cluster.json
-./setup/k3s-complete-setup.ps1
+./setup/k3s-setup.ps1
 
 # Use custom configuration file
-./setup/k3s-complete-setup.ps1 -ConfigFile "production-cluster.json"
+./setup/k3s-setup.ps1 -ConfigFile "production-cluster.json"
 
 # Select option 1 for complete deployment
 # Step-by-step deployment options:
@@ -53,8 +53,15 @@ Key architectural decisions:
 ./test-config.ps1
 ./test-config.ps1 -ConfigFile "production-cluster.json"
 
-# Deploy minimal test cluster (1 proxy + 1 master + 1 worker)
-./setup/k3s-complete-setup.ps1 -ConfigFile "test-cluster.json"
+# Local testing with Vagrant (easiest for development)
+cd test/minimal-cluster
+./vagrant-setup.ps1 prereqs   # Check prerequisites first
+./vagrant-setup.ps1 up        # Start 3 VMs (checks prereqs automatically)
+pwsh ../../setup/k3s-setup.ps1 -ConfigFile test/minimal-cluster/vagrant-cluster.json  # Deploy K3s cluster
+./vagrant-setup.ps1 destroy   # Clean up
+
+# Deploy minimal test cluster on remote VMs
+./setup/k3s-setup.ps1 -ConfigFile "test-cluster.json"
 ```
 
 ### Day 2 Operations
@@ -116,8 +123,9 @@ ssh ubuntu@10.0.1.10 "showmount -e localhost"
 ## Repository Structure
 
 - **setup/** - Initial deployment scripts and documentation
-  - `k3s-complete-setup.ps1` - Main deployment automation script
+  - `k3s-setup.ps1` - Main deployment automation script (renamed from k3s-complete-setup.ps1)
   - `k3s-deployment-guide.md` - Detailed deployment instructions and troubleshooting
+  - `config/` - Generated deployment configuration files (ignored by git)
   
 - **operations/** - Day 2 operational scripts
   - `k3s-add-node.ps1` - Add new master or worker nodes
@@ -125,6 +133,16 @@ ssh ubuntu@10.0.1.10 "showmount -e localhost"
   - `k3s-certificate-renewal.ps1` - TLS certificate management
   - `k3s-backup-restore.ps1` - Backup and restore procedures
   - `k3s-health-troubleshoot.ps1` - Health checks and diagnostics
+
+- **Local Testing Environment**
+  - `Vagrantfile` - Creates 3 VMs for local testing
+  - `test/minimal-cluster/vagrant-cluster.json` - Configuration for Vagrant environment
+  - `test/minimal-cluster/vagrant-setup.ps1` - Manage Vagrant test environment
+  - `test/minimal-cluster/ssh_keys/` - Vagrant SSH keys (auto-generated, ignored by git)
+
+- **Generated Configuration Files**
+  - `setup/config/` - Generated deployment files (nginx.conf, setup scripts, yaml files)
+  - All generated files are ignored by git and created automatically during deployment
 
 ## Configuration Management
 
@@ -211,6 +229,8 @@ When modifying scripts:
 - All remote operations include error handling and status reporting
 - Scripts support both automated and manual execution modes
 - Use `-ConfigFile` parameter to support multiple environments
+- Generated deployment files are stored in `setup/config/` and ignored by git
+- SSH keys for Vagrant testing are stored in `test/minimal-cluster/ssh_keys/` and ignored by git
 
 **Module Usage:**
 ```powershell

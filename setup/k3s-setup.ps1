@@ -3,7 +3,10 @@
 
 param(
     [Parameter(Mandatory=$false)]
-    [string]$ConfigFile = "cluster.json"
+    [string]$ConfigFile = "cluster.json",
+    
+    [Parameter(Mandatory=$false)]
+    [bool]$SetKubectlContext = $true
 )
 
 #########################################
@@ -24,6 +27,8 @@ $Config = Load-ClusterConfig -ConfigPath $ConfigFile
 #########################################
 
 $NginxConfig = @'
+load_module modules/ngx_stream_module.so;
+
 user www-data;
 worker_processes auto;
 pid /run/nginx.pid;
@@ -278,6 +283,10 @@ sed -i '/ swap / s/^\(.*\)$/#\1/g' /etc/fstab
 echo "K3s agent args: $K3S_AGENT_ARGS"
 eval "curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION=$K3S_VERSION sh -s - agent $K3S_AGENT_ARGS"
 
+# Create K3s environment file with token (required for systemd service)
+echo "K3S_TOKEN=$K3S_TOKEN" > /etc/systemd/system/k3s-agent.service.env
+systemctl daemon-reload
+
 echo "Worker setup complete!"
 '@
 
@@ -431,7 +440,7 @@ Write-Host "  Workers: $($Config.WorkerIPs -join ', ')" -ForegroundColor White
 
 # Function to deploy scripts
 function Deploy-Scripts {
-    Write-Host "`n=== Preparing deployment scripts ===" -ForegroundColor Green
+    Write-Host "`n=== Preparing deployment scripts ===" -ForegroundColor Cyan
     
     # Generate master server lines for Nginx upstream
     $masterServers = ""
@@ -451,17 +460,29 @@ function Deploy-Scripts {
     $NFSProvisionerFinal = $NFSProvisionerYaml -replace '###PRIMARY_MASTER_IP###', $Config.MasterIPs[0]
     $NFSProvisionerFinal = $NFSProvisionerFinal -replace '###NFS_MOUNT_PATH###', $Config.NFSMountPath
     
-    # Save scripts locally
-    $NginxConfigFinal | Out-File -FilePath "nginx.conf" -Encoding UTF8
-    $ProxySetupFinal | Out-File -FilePath "setup-proxy.sh" -Encoding UTF8
-    $MasterSetupScript | Out-File -FilePath "setup-master.sh" -Encoding UTF8
-    $WorkerSetupScript | Out-File -FilePath "setup-worker.sh" -Encoding UTF8
-    $NFSProvisionerFinal | Out-File -FilePath "nfs-provisioner.yaml" -Encoding UTF8
+    # Create config directory if it doesn't exist (relative to script location)
+    $configDir = "$PSScriptRoot/config"
+    if (-not (Test-Path $configDir)) {
+        New-Item -ItemType Directory -Path $configDir -Force | Out-Null
+        Write-Host "  ✓ Created config directory" -ForegroundColor Green
+    }
+    
+    # Save scripts locally in config directory
+    $NginxConfigFinal | Out-File -FilePath "$configDir/nginx.conf" -Encoding UTF8
+    $ProxySetupFinal | Out-File -FilePath "$configDir/setup-proxy.sh" -Encoding UTF8
+    $MasterSetupScript | Out-File -FilePath "$configDir/setup-master.sh" -Encoding UTF8
+    $WorkerSetupScript | Out-File -FilePath "$configDir/setup-worker.sh" -Encoding UTF8
+    $NFSProvisionerFinal | Out-File -FilePath "$configDir/nfs-provisioner.yaml" -Encoding UTF8
+    Write-Host "  ✓ Generated deployment configuration files" -ForegroundColor Green
     
     # Convert line endings for Linux
-    Get-ChildItem *.sh | ForEach-Object {
-        $content = Get-Content $_.FullName -Raw
-        $content -replace "`r`n", "`n" | Set-Content $_.FullName -NoNewline
+    $shellScripts = Get-ChildItem "$configDir/*.sh" -ErrorAction SilentlyContinue
+    if ($shellScripts) {
+        $shellScripts | ForEach-Object {
+            $content = Get-Content $_.FullName -Raw
+            $content -replace "`r`n", "`n" | Set-Content $_.FullName -NoNewline
+        }
+        Write-Host "  ✓ Converted line endings for Linux compatibility" -ForegroundColor Green
     }
 }
 
@@ -469,9 +490,14 @@ function Deploy-Scripts {
 function Setup-ProxyNode {
     Write-Host "`n=== Setting up Nginx Proxy ===" -ForegroundColor Green
     
-    # Copy and execute setup script
-    Copy-FileToNode -Config $Config -Node $Config.ProxyIP -LocalPath "setup-proxy.sh" -RemotePath "/tmp/setup-proxy.sh"
-    Invoke-SSHCommand -Config $Config -Node $Config.ProxyIP -Command "chmod +x /tmp/setup-proxy.sh && sudo /tmp/setup-proxy.sh"
+    # Copy and execute setup script in two steps to avoid complex quoting issues
+    Copy-FileToNode -Config $Config -Node $Config.ProxyIP -LocalPath "$PSScriptRoot/config/setup-proxy.sh" -RemotePath "/tmp/setup-proxy.sh"
+    
+    $chmodCmd = "chmod +x /tmp/setup-proxy.sh"
+    Invoke-SSHCommand -Config $Config -Node $Config.ProxyIP -Command $chmodCmd
+    
+    $setupCmd = "sudo /tmp/setup-proxy.sh"
+    Invoke-SSHCommand -Config $Config -Node $Config.ProxyIP -Command $setupCmd
     
     Write-Host "Proxy setup complete!" -ForegroundColor Green
 }
@@ -497,10 +523,13 @@ function Setup-MasterNodes {
         Write-Host "  K3s server arguments: $k3sServerArgs" -ForegroundColor Cyan
         
         # Copy setup script
-        Copy-FileToNode -Config $Config -Node $masterIP -LocalPath "setup-master.sh" -RemotePath "/tmp/setup-master.sh"
+        Copy-FileToNode -Config $Config -Node $masterIP -LocalPath "$PSScriptRoot/config/setup-master.sh" -RemotePath "/tmp/setup-master.sh"
         
-        # Execute setup script
-        $setupCmd = "chmod +x /tmp/setup-master.sh && sudo /tmp/setup-master.sh $masterNumber $($Config.MasterIPs[0]) $($Config.K3sToken) $($Config.K3sVersion) $($Config.StorageDevice) $($Config.NFSMountPath) `"$k3sServerArgs`""
+        # Execute setup script in two steps to avoid complex quoting issues
+        $chmodCmd = "chmod +x /tmp/setup-master.sh"
+        Invoke-SSHCommand -Config $Config -Node $masterIP -Command $chmodCmd
+        
+        $setupCmd = "sudo /tmp/setup-master.sh $masterNumber $($Config.MasterIPs[0]) $($Config.K3sToken) $($Config.K3sVersion) $($Config.StorageDevice) $($Config.NFSMountPath) '$k3sServerArgs'"
         Invoke-SSHCommand -Config $Config -Node $masterIP -Command $setupCmd
         
         if ($i -eq 0) {
@@ -527,10 +556,13 @@ function Setup-WorkerNodes {
         Write-Host "`nSetting up Worker ($workerIP)..." -ForegroundColor Yellow
         
         # Copy setup script
-        Copy-FileToNode -Config $Config -Node $workerIP -LocalPath "setup-worker.sh" -RemotePath "/tmp/setup-worker.sh"
+        Copy-FileToNode -Config $Config -Node $workerIP -LocalPath "$PSScriptRoot/config/setup-worker.sh" -RemotePath "/tmp/setup-worker.sh"
         
-        # Execute setup script
-        $setupCmd = "chmod +x /tmp/setup-worker.sh && sudo /tmp/setup-worker.sh $($Config.ProxyIP) $($Config.K3sToken) $($Config.K3sVersion) `"$k3sAgentArgs`""
+        # Execute setup script in two steps to avoid complex quoting issues
+        $chmodCmd = "chmod +x /tmp/setup-worker.sh"
+        Invoke-SSHCommand -Config $Config -Node $workerIP -Command $chmodCmd
+        
+        $setupCmd = "sudo /tmp/setup-worker.sh $($Config.ProxyIP) $($Config.K3sToken) $($Config.K3sVersion) '$k3sAgentArgs'"
         Invoke-SSHCommand -Config $Config -Node $workerIP -Command $setupCmd
         
         Start-Sleep -Seconds 10
@@ -548,18 +580,74 @@ function Configure-Cluster {
     New-Item -ItemType Directory -Force -Path "$HOME\.kube" | Out-Null
     
     Write-Host "Retrieving kubeconfig..." -ForegroundColor Yellow
-    scp -i $Config.SSHKeyPath -o StrictHostKeyChecking=no "$($Config.SSHUser)@$($Config.MasterIPs[0]):/etc/rancher/k3s/k3s.yaml" $kubeconfigPath
+    Copy-FileFromNode -Config $Config -Node $Config.MasterIPs[0] -RemotePath "/etc/rancher/k3s/k3s.yaml" -LocalPath $kubeconfigPath
     
     # Update kubeconfig to use proxy
     $kubeconfig = Get-Content $kubeconfigPath -Raw
     $kubeconfig = $kubeconfig -replace 'https://127.0.0.1:6443', "https://$($Config.ProxyIP):6443"
     $kubeconfig | Set-Content $kubeconfigPath
     
-    $env:KUBECONFIG = $kubeconfigPath
+    # Configure kubectl context if requested
+    if ($SetKubectlContext) {
+        Write-Host "Configuring kubectl context..." -ForegroundColor Yellow
+        
+        # Generate context name based on cluster name and proxy IP
+        $contextName = "$($Config.ClusterName)-$($Config.ProxyIP)"
+        $clusterName = "$($Config.ClusterName)-cluster"
+        $userName = "$($Config.ClusterName)-admin"
+        
+        # Load the k3s-config as YAML
+        $kconfigContent = Get-Content $kubeconfigPath -Raw
+        
+        # Replace context name
+        $kconfigContent = $kconfigContent -replace '  name: default\s*\n\s*current-context:', "  name: $contextName`ncurrent-context:"
+        
+        # Replace current-context
+        $kconfigContent = $kconfigContent -replace 'current-context: default', "current-context: $contextName"
+        
+        # Replace cluster references in contexts section
+        $kconfigContent = $kconfigContent -replace 'cluster: default', "cluster: $clusterName"
+        
+        # Replace user references in contexts section
+        $kconfigContent = $kconfigContent -replace 'user: default', "user: $userName"
+        
+        # Replace cluster name in clusters section
+        $kconfigContent = $kconfigContent -replace '(clusters:[\s\S]*?)name: default', "`$1name: $clusterName"
+        
+        # Replace user name in users section
+        $kconfigContent = $kconfigContent -replace '(users:[\s\S]*?)name: default', "`$1name: $userName"
+        
+        # Save modified config
+        $kconfigContent | Set-Content $kubeconfigPath
+        
+        # Now merge with existing config if it exists
+        if (Test-Path "$env:HOME/.kube/config") {
+            # Backup existing config
+            Copy-Item "$env:HOME/.kube/config" "$env:HOME/.kube/config.backup" -Force
+            
+            # Merge configs
+            $env:KUBECONFIG = "$env:HOME/.kube/config:$kubeconfigPath"
+            kubectl config view --flatten > "$env:HOME/.kube/config-merged"
+            Move-Item "$env:HOME/.kube/config-merged" "$env:HOME/.kube/config" -Force
+        } else {
+            # If no existing config, just copy our file
+            Copy-Item $kubeconfigPath "$env:HOME/.kube/config" -Force
+        }
+        
+        # Switch to the new context
+        $env:KUBECONFIG = "$env:HOME/.kube/config"
+        kubectl config use-context $contextName
+        
+        Write-Host "✓ Kubectl context '$contextName' configured and set as current" -ForegroundColor Green
+        Write-Host "  You can now use 'kubectl get nodes' directly" -ForegroundColor Cyan
+    } else {
+        $env:KUBECONFIG = $kubeconfigPath
+        Write-Host "  Use: export KUBECONFIG=$kubeconfigPath" -ForegroundColor Cyan
+    }
     
     # Deploy NFS provisioner
     Write-Host "Deploying NFS provisioner..." -ForegroundColor Yellow
-    kubectl apply -f nfs-provisioner.yaml
+    kubectl apply -f "$PSScriptRoot/config/nfs-provisioner.yaml"
     
     # Wait for provisioner to be ready
     Start-Sleep -Seconds 20
@@ -680,7 +768,7 @@ switch ($choice) {
 
 # Cleanup function
 function Remove-TempFiles {
-    Remove-Item -Path "nginx.conf", "setup-proxy.sh", "setup-master.sh", "setup-worker.sh", "nfs-provisioner.yaml" -ErrorAction SilentlyContinue
+    Remove-Item -Path "$PSScriptRoot/config" -Recurse -ErrorAction SilentlyContinue
 }
 
 # Uncomment to cleanup temp files after deployment

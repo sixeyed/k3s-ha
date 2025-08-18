@@ -1,0 +1,3 @@
+# Ignore all SSH keys to prevent accidental commits
+*
+!.gitignore

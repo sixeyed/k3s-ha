@@ -44,6 +44,13 @@ This repository provides a complete Infrastructure-as-Code solution for deployin
 
 ## 📋 Prerequisites
 
+### For Local Testing (Vagrant)
+- **VirtualBox** 6.1+ or VMware
+- **Vagrant** 2.3+
+- **PowerShell 5.1+** (Windows, Linux, or macOS)
+- **8GB+ RAM** and **20GB+ disk space** for VMs
+
+### For Production/Remote Deployment
 - **Ubuntu VMs** (20.04/22.04 LTS recommended) - Minimum 3 VMs (1 proxy + 1 master + 1 worker), recommended 10 VMs for HA
 - **PowerShell 5.1+** on deployment machine (Windows, Linux, or macOS)
 - **SSH key authentication** configured for all nodes
@@ -80,7 +87,7 @@ This repository provides a complete Infrastructure-as-Code solution for deployin
 
 3. **Run deployment**
    ```powershell
-   ./setup/k3s-complete-setup.ps1
+   ./setup/k3s-setup.ps1
    # Select option 1 for full deployment
    ```
 
@@ -96,9 +103,16 @@ This repository provides a complete Infrastructure-as-Code solution for deployin
 - [cluster.json](/cluster.json) - Main configuration file for all cluster settings
 - [lib/K3sCluster.psm1](/lib/K3sCluster.psm1) - Shared PowerShell module with all cluster functions
 
+### Local Testing
+- [test/minimal-cluster/Vagrantfile](/test/minimal-cluster/Vagrantfile) - Local test environment (3 VMs)
+- [test/minimal-cluster/vagrant-cluster.json](/test/minimal-cluster/vagrant-cluster.json) - Vagrant-specific configuration
+- [test/minimal-cluster/vagrant-setup.ps1](/test/minimal-cluster/vagrant-setup.ps1) - Vagrant management script
+- [test/minimal-cluster/ssh_keys/](/test/minimal-cluster/ssh_keys) - Vagrant SSH keys (ignored by git)
+
 ### Initial Setup
-- [setup/k3s-complete-setup.ps1](/setup/k3s-complete-setup.ps1) - Main deployment script
+- [setup/k3s-setup.ps1](/setup/k3s-setup.ps1) - Main deployment script
 - [setup/k3s-deployment-guide.md](/setup/k3s-deployment-guide.md) - Detailed deployment instructions
+- [setup/config/](/setup/config) - Generated deployment configuration files (ignored by git)
 
 ### Day 2 Operations
 - [operations/k3s-add-node.ps1](/operations/k3s-add-node.ps1) - Add new nodes to cluster
@@ -122,18 +136,63 @@ This repository provides a complete Infrastructure-as-Code solution for deployin
 ./operations/k3s-upgrade-cluster.ps1 -NewK3sVersion "v1.31.2+k3s1"
 ```
 
-### Testing with Minimal Setup
+## 🧪 Testing
+
+### Minimal Cluster Setup with Vagrant
+
+The fastest way to test the deployment is using the included Vagrant environment:
+
+```powershell
+# 1. Navigate to test directory
+cd test/minimal-cluster
+
+# 2. Check prerequisites (Vagrant, VirtualBox, etc.)
+./vagrant-setup.ps1 prereqs
+
+# 3. Start VMs (creates 3 VMs: proxy + master + worker)
+./vagrant-setup.ps1 up
+
+# 4. Deploy K3s cluster 
+pwsh ../../setup/k3s-setup.ps1 -ConfigFile test/minimal-cluster/vagrant-cluster.json
+# Select option 1 for full deployment
+
+# 5. Verify cluster
+kubectl get nodes
+kubectl get pods -A
+```
+
+**VM Management:**
+```powershell
+./vagrant-setup.ps1 status                 # Check VM status
+./vagrant-setup.ps1 ssh -Node master      # SSH to master node
+./vagrant-setup.ps1 ssh -Node worker      # SSH to worker node
+./vagrant-setup.ps1 ssh -Node proxy       # SSH to proxy node
+./vagrant-setup.ps1 destroy               # Clean up everything
+```
+
+**Test Environment Details:**
+- **Proxy**: 192.168.56.100 (k3s-proxy) - Nginx load balancer
+- **Master**: 192.168.56.10 (k3s-master-1) - K3s server + NFS storage
+- **Worker**: 192.168.56.20 (k3s-worker-1) - K3s agent
+- **SSH**: Automatically configured with Vagrant keys
+- **Storage**: NFS provisioner for persistent volumes
+
+**Platform Compatibility:**
+- ✅ **Intel Mac/Windows/Linux**: Full VirtualBox support
+- ⚠️ **Apple Silicon (ARM64)**: VirtualBox 7.1+ provides ARM64 support with Bento boxes
+
+### Testing with Remote VMs
 ```powershell
 # Deploy a minimal cluster (1 proxy + 1 master + 1 worker) for testing
 ./test-config.ps1 -ConfigFile "test-cluster.json"  # Validate configuration
-./setup/k3s-complete-setup.ps1 -ConfigFile "test-cluster.json"
+./setup/k3s-setup.ps1 -ConfigFile "test-cluster.json"
 ```
 
 ### Using Custom Configuration
 ```powershell
 # Use different configuration files for different environments
-./setup/k3s-complete-setup.ps1 -ConfigFile "staging-cluster.json"
-./setup/k3s-complete-setup.ps1 -ConfigFile "production-cluster.json"
+./setup/k3s-setup.ps1 -ConfigFile "staging-cluster.json"
+./setup/k3s-setup.ps1 -ConfigFile "production-cluster.json"
 ./operations/k3s-add-node.ps1 -NodeType worker -NewNodeIP "10.0.1.26" -ConfigFile "staging-cluster.json"
 ```
 

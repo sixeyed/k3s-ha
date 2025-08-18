@@ -104,7 +104,31 @@ function Copy-FileToNode {
         [string]$RemotePath
     )
     
-    scp -i $Config.SSHKeyPath -o StrictHostKeyChecking=no $LocalPath "$($Config.SSHUser)@$Node`:$RemotePath"
+    # Check if we're in a Vagrant environment
+    if (Test-Path "Vagrantfile") {
+        # Use Vagrant to copy files - we need to determine the VM name based on IP
+        $vmName = Get-VagrantVMName -IPAddress $Node
+        if ($vmName) {
+            # Copy to vagrant shared folder first, then move to target location inside VM
+            $fileName = Split-Path -Leaf $LocalPath
+            $localSharedPath = "./temp_$fileName"  # Local path to copy to current directory with unique name
+            $sharedPath = "/vagrant/temp_$fileName"  # Path inside VM
+            
+            # Copy file to current directory with temp name (will be available in VM at /vagrant)
+            Copy-Item $LocalPath $localSharedPath -Force
+            
+            # Move file inside VM to target location
+            vagrant ssh $vmName -c "sudo cp '$sharedPath' '$RemotePath' && sudo chmod +x '$RemotePath'"
+            
+            # Clean up temp file
+            Remove-Item $localSharedPath -Force -ErrorAction SilentlyContinue
+        } else {
+            Write-Host "Warning: Could not determine Vagrant VM name for IP $Node, using direct SSH" -ForegroundColor Yellow
+            scp -i $Config.SSHKeyPath -o StrictHostKeyChecking=no $LocalPath "$($Config.SSHUser)@$Node`:$RemotePath"
+        }
+    } else {
+        scp -i $Config.SSHKeyPath -o StrictHostKeyChecking=no $LocalPath "$($Config.SSHUser)@$Node`:$RemotePath"
+    }
 }
 
 function Copy-FileFromNode {
@@ -119,7 +143,31 @@ function Copy-FileFromNode {
         [string]$LocalPath
     )
     
-    scp -i $Config.SSHKeyPath -o StrictHostKeyChecking=no "$($Config.SSHUser)@$Node`:$RemotePath" $LocalPath
+    # Check if we're in a Vagrant environment
+    if (Test-Path "Vagrantfile") {
+        # Use Vagrant to copy files - we need to determine the VM name based on IP
+        $vmName = Get-VagrantVMName -IPAddress $Node
+        if ($vmName) {
+            # Copy to vagrant shared folder first, then get it locally
+            $fileName = Split-Path -Leaf $RemotePath
+            $sharedPath = "/vagrant/temp_$fileName"
+            $localSharedPath = "./temp_$fileName"
+            
+            # Copy from remote path to shared folder inside VM
+            vagrant ssh $vmName -c "sudo cp '$RemotePath' '$sharedPath'"
+            
+            # Copy from shared folder to local path
+            Copy-Item $localSharedPath $LocalPath -Force
+            
+            # Clean up temp file
+            Remove-Item $localSharedPath -Force -ErrorAction SilentlyContinue
+        } else {
+            Write-Host "Warning: Could not determine Vagrant VM name for IP $Node, using direct SSH" -ForegroundColor Yellow
+            scp -i $Config.SSHKeyPath -o StrictHostKeyChecking=no "$($Config.SSHUser)@$Node`:$RemotePath" $LocalPath
+        }
+    } else {
+        scp -i $Config.SSHKeyPath -o StrictHostKeyChecking=no "$($Config.SSHUser)@$Node`:$RemotePath" $LocalPath
+    }
 }
 
 # Helper function for backwards compatibility - wraps Get-SSHCommand
@@ -133,7 +181,36 @@ function Invoke-SSHCommand {
         [string]$Command
     )
     
-    Get-SSHCommand -Config $Config -Node $Node -Command $Command
+    # Check if we're in a Vagrant environment
+    if (Test-Path "Vagrantfile") {
+        # Use Vagrant SSH command
+        $vmName = Get-VagrantVMName -IPAddress $Node
+        if ($vmName) {
+            # Properly quote the command for vagrant ssh
+            vagrant ssh $vmName -c "$Command"
+        } else {
+            Write-Host "Warning: Could not determine Vagrant VM name for IP $Node, using direct SSH" -ForegroundColor Yellow
+            Get-SSHCommand -Config $Config -Node $Node -Command $Command
+        }
+    } else {
+        Get-SSHCommand -Config $Config -Node $Node -Command $Command
+    }
+}
+
+# Function to get Vagrant VM name based on IP address
+function Get-VagrantVMName {
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$IPAddress
+    )
+    
+    # Map IP addresses to VM names based on our Vagrantfile configuration
+    switch ($IPAddress) {
+        "192.168.56.100" { return "k3s-proxy" }
+        "192.168.56.10" { return "k3s-master-1" }
+        "192.168.56.20" { return "k3s-worker-1" }
+        default { return $null }
+    }
 }
 
 # Function to build K3s server arguments based on configuration
