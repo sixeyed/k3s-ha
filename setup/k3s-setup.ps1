@@ -319,7 +319,30 @@ echo "Worker setup complete!"
 # NFS PROVISIONER K8S MANIFEST
 #########################################
 
-$NFSProvisionerYaml = @'
+# NFS Provisioner deployment is now handled via Helm chart
+# See Deploy-NFSProvisioner function below
+
+#########################################
+# NFS PROVISIONER DEPLOYMENT FUNCTION
+#########################################
+
+function Deploy-NFSProvisioner {
+    param(
+        [Parameter(Mandatory=$true)]
+        [hashtable]$Config
+    )
+    
+    Write-Host "Deploying NFS provisioner via YAML..." -ForegroundColor Yellow
+    
+    # Get primary master IP and NFS path from config
+    $nfsServer = $Config.MasterIPs[0] 
+    $nfsPath = $Config.NFSProvisionerPath
+    
+    Write-Host "  NFS Server: $nfsServer" -ForegroundColor Cyan
+    Write-Host "  NFS Path: $nfsPath" -ForegroundColor Cyan
+    
+    # Create NFS provisioner YAML with proper configuration
+    $nfsProvisionerYAML = @"
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -409,6 +432,10 @@ spec:
         app: nfs-client-provisioner
     spec:
       serviceAccountName: nfs-client-provisioner
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      nodeSelector:
+        kubernetes.io/os: linux
       containers:
         - name: nfs-client-provisioner
           image: registry.k8s.io/sig-storage/nfs-subdir-external-provisioner:v4.0.2
@@ -417,16 +444,20 @@ spec:
               mountPath: /persistentvolumes
           env:
             - name: PROVISIONER_NAME
-              value: k3s.io/nfs
+              value: k3s.io/nfs-client
             - name: NFS_SERVER
-              value: ###PRIMARY_MASTER_IP###  # Primary master NFS
+              value: $nfsServer
             - name: NFS_PATH
-              value: ###NFS_MOUNT_PATH###/shared
+              value: $nfsPath
+            - name: KUBERNETES_SERVICE_HOST
+              value: $($Config.ProxyIP)
+            - name: KUBERNETES_SERVICE_PORT
+              value: "6443"
       volumes:
         - name: nfs-client-root
           nfs:
-            server: ###PRIMARY_MASTER_IP###
-            path: ###NFS_MOUNT_PATH###/shared
+            server: $nfsServer
+            path: $nfsPath
 ---
 apiVersion: storage.k8s.io/v1
 kind: StorageClass
@@ -434,10 +465,10 @@ metadata:
   name: nfs-client
   annotations:
     storageclass.kubernetes.io/is-default-class: "false"
-provisioner: k3s.io/nfs
+provisioner: k3s.io/nfs-client
 parameters:
   archiveOnDelete: "false"
-  pathPattern: "${.PVC.namespace}/${.PVC.name}"
+  pathPattern: "`${.PVC.namespace}/`${.PVC.name}"
 reclaimPolicy: Delete
 allowVolumeExpansion: true
 ---
@@ -445,13 +476,65 @@ apiVersion: storage.k8s.io/v1
 kind: StorageClass
 metadata:
   name: nfs-client-retain
-provisioner: k3s.io/nfs
+provisioner: k3s.io/nfs-client
 parameters:
   archiveOnDelete: "true"
-  pathPattern: "${.PVC.namespace}/${.PVC.name}"
+  pathPattern: "`${.PVC.namespace}/`${.PVC.name}"
 reclaimPolicy: Retain
 allowVolumeExpansion: true
-'@
+"@
+
+    Write-Host "  Applying NFS provisioner configuration..." -ForegroundColor Gray
+    $nfsProvisionerYAML | kubectl apply -f -
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to deploy NFS provisioner via YAML"
+    }
+    
+    Write-Host "  ✓ NFS provisioner deployed successfully" -ForegroundColor Green
+    
+    # Wait for deployment to be ready
+    Write-Host "  Waiting for NFS provisioner to be ready..." -ForegroundColor Gray
+    kubectl rollout status deployment/nfs-client-provisioner -n nfs-provisioner --timeout=300s
+    
+    # Test that NFS provisioner actually works by creating a test PVC
+    Write-Host "  Testing NFS provisioner functionality..." -ForegroundColor Gray
+    $testPVC = @"
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: nfs-provisioner-test
+  namespace: nfs-provisioner
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: nfs-client
+  resources:
+    requests:
+      storage: 1Gi
+"@
+    $testPVC | kubectl apply -f -
+    
+    # Wait for PVC to be bound (this verifies the provisioner is working)
+    $timeout = 60
+    $elapsed = 0
+    do {
+        $pvcStatus = kubectl get pvc nfs-provisioner-test -n nfs-provisioner -o jsonpath='{.status.phase}' 2>$null
+        if ($pvcStatus -eq "Bound") {
+            Write-Host "  ✓ NFS provisioner test successful" -ForegroundColor Green
+            kubectl delete pvc nfs-provisioner-test -n nfs-provisioner >$null 2>&1
+            break
+        }
+        Start-Sleep 2
+        $elapsed += 2
+    } while ($elapsed -lt $timeout)
+    
+    if ($pvcStatus -ne "Bound") {
+        kubectl delete pvc nfs-provisioner-test -n nfs-provisioner >$null 2>&1
+        throw "NFS provisioner test failed - PVC did not bind within $timeout seconds"
+    }
+    
+    Write-Host "✓ NFS provisioner deployment complete!" -ForegroundColor Green
+}
 
 #########################################
 # MAIN DEPLOYMENT SCRIPT
@@ -483,9 +566,7 @@ function Deploy-Scripts {
     $ProxySetupFinal = $ProxySetupScript -replace '###NGINX_CONFIG###', $NginxConfigFinal
     $ProxySetupFinal = $ProxySetupFinal -replace '###PROXY_IP###', $Config.ProxyIP
     
-    # Prepare NFS provisioner YAML with actual IPs
-    $NFSProvisionerFinal = $NFSProvisionerYaml -replace '###PRIMARY_MASTER_IP###', $Config.MasterIPs[0]
-    $NFSProvisionerFinal = $NFSProvisionerFinal -replace '###NFS_MOUNT_PATH###', $Config.NFSMountPath
+    # NFS provisioner now deployed via Helm chart (see Deploy-NFSProvisioner function)
     
     # Create config directory if it doesn't exist (relative to script location)
     $configDir = "$PSScriptRoot/config"
@@ -499,7 +580,6 @@ function Deploy-Scripts {
     $ProxySetupFinal | Out-File -FilePath "$configDir/setup-proxy.sh" -Encoding UTF8
     $MasterSetupScript | Out-File -FilePath "$configDir/setup-master.sh" -Encoding UTF8
     $WorkerSetupScript | Out-File -FilePath "$configDir/setup-worker.sh" -Encoding UTF8
-    $NFSProvisionerFinal | Out-File -FilePath "$configDir/nfs-provisioner.yaml" -Encoding UTF8
     Write-Host "  ✓ Generated deployment configuration files" -ForegroundColor Green
     
     # Convert line endings for Linux
@@ -790,13 +870,8 @@ function Configure-Cluster {
         Write-Host "  Use: export KUBECONFIG=$kubeconfigPath" -ForegroundColor Cyan
     }
     
-    # Deploy NFS provisioner
-    Write-Host "Deploying NFS provisioner..." -ForegroundColor Yellow
-    kubectl apply -f "$PSScriptRoot/config/nfs-provisioner.yaml"
-    
-    # Wait for provisioner to be ready
-    Start-Sleep -Seconds 20
-    kubectl rollout status deployment/nfs-client-provisioner -n nfs-provisioner
+    # Deploy NFS provisioner via Helm
+    Deploy-NFSProvisioner -Config $Config
     
     Write-Host "Cluster configuration complete!" -ForegroundColor Green
 }

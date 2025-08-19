@@ -58,12 +58,23 @@ Key architectural decisions:
 ./test-config.ps1
 ./test-config.ps1 -ConfigFile "production-cluster.json"
 
-# Local testing with Vagrant (easiest for development)
-cd test/minimal-cluster
-./vagrant-setup.ps1 prereqs   # Check prerequisites first
-./vagrant-setup.ps1 up        # Start 3 VMs (checks prereqs automatically)
-pwsh ../../setup/k3s-setup.ps1 -ConfigFile vagrant-cluster.json  # Deploy K3s cluster
-./vagrant-setup.ps1 destroy   # Clean up
+# Local testing with Vagrant (easiest for development - complete end-to-end workflow)
+cd test/clusters/vagrant/minimal
+./vagrant-setup.ps1 up        # Start 3 VMs with NFS setup (proxy + master + worker)
+
+# Deploy K3s cluster with YAML-based NFS provisioner
+cd ../../../../setup
+./k3s-setup.ps1 -ConfigFile "../test/clusters/vagrant/minimal/vagrant-cluster.json"
+
+# Test cluster functionality with demo apps
+cd ../test/apps
+./deploy-postgres-nfs.ps1 -Action deploy -Namespace demo-apps    # Deploy PostgreSQL with NFS
+./deploy-postgres-nfs.ps1 -Action test -Namespace demo-apps      # Verify NFS storage works
+./deploy-all-demos.ps1 -Action full                              # Deploy and test all demo apps
+
+# Clean up
+cd ../clusters/vagrant/minimal
+./vagrant-setup.ps1 destroy   # Clean up VMs
 
 # Deploy minimal test cluster on remote VMs
 ./setup/k3s-setup.ps1 -ConfigFile "test-cluster.json"
@@ -128,7 +139,7 @@ ssh ubuntu@10.0.1.10 "showmount -e localhost"
 ## Repository Structure
 
 - **setup/** - Initial deployment scripts and documentation
-  - `k3s-setup.ps1` - Main deployment automation script
+  - `k3s-setup.ps1` - Main deployment automation script with YAML-based NFS provisioner
   - `k3s-deployment-guide.md` - Detailed deployment instructions and troubleshooting
   - `config/` - Generated deployment configuration files (ignored by git)
   
@@ -139,11 +150,20 @@ ssh ubuntu@10.0.1.10 "showmount -e localhost"
   - `k3s-backup-restore.ps1` - Backup and restore procedures
   - `k3s-health-troubleshoot.ps1` - Health checks and diagnostics
 
-- **Local Testing Environment**
-  - `Vagrantfile` - Creates 3 VMs for local testing
-  - `test/minimal-cluster/vagrant-cluster.json` - Configuration for Vagrant environment
-  - `test/minimal-cluster/vagrant-setup.ps1` - Manage Vagrant test environment
-  - `test/minimal-cluster/ssh_keys/` - Vagrant SSH keys (auto-generated, ignored by git)
+- **lib/** - Shared PowerShell modules
+  - `K3sCluster.psm1` - Centralized cluster management functions with SSH automation
+
+- **test/** - Testing environments and demo applications
+  - **clusters/vagrant/minimal/** - Minimal test environment (3 VMs: proxy + master + worker)
+    - `Vagrantfile` - VirtualBox/VMware VM configuration with ARM64 support
+    - `vagrant-cluster.json` - Vagrant-specific configuration
+    - `vagrant-setup.ps1` - Vagrant VM management script
+    - `ssh_keys/` - Auto-generated Vagrant SSH keys (ignored by git)
+  - **apps/** - Demo applications for testing cluster functionality
+    - `deploy-postgres-nfs.ps1` - PostgreSQL with NFS storage (tests RWX volumes)
+    - `deploy-redis-local.ps1` - Redis with local storage (tests RWO volumes)
+    - `deploy-nginx-lb.ps1` - Nginx load balancer (tests NodePort services)
+    - `deploy-all-demos.ps1` - Deploy and test all demo apps together
 
 - **Generated Configuration Files**
   - `setup/config/` - Generated deployment files (nginx.conf, setup scripts, yaml files)
@@ -174,7 +194,8 @@ All configuration is centralized in JSON files, with `cluster.json` as the defau
   },
   "storage": {
     "device": "/dev/sdb",
-    "nfsMountPath": "/data/nfs"
+    "nfsMountPath": "/data/nfs",
+    "nfsProvisionerPath": "/data/nfs/shared"
   },
   "ssh": {
     "user": "ubuntu",
@@ -214,15 +235,28 @@ All configuration is centralized in JSON files, with `cluster.json` as the defau
 ## Storage Architecture
 
 The cluster provides two storage options:
-- **NFS Dynamic Provisioning** - Via masters with storage classes:
-  - `nfs-client` - Dynamic provisioning with delete reclaim policy
-  - `nfs-client-retain` - Dynamic provisioning with retain reclaim policy
-- **Local Storage** - For high-performance workloads using local-path provisioner
+- **NFS Dynamic Provisioning** - Via YAML-based provisioner running on masters with storage classes:
+  - `nfs-client` - Dynamic provisioning with delete reclaim policy (data deleted when PVC removed)
+  - `nfs-client-retain` - Dynamic provisioning with retain reclaim policy (data preserved when PVC removed)
+- **Local Storage** - For high-performance workloads using local-path provisioner (default)
 
-NFS exports available:
-- `/data/nfs/shared` - General shared storage
-- `/data/nfs/data` - Application data storage  
-- `/data/nfs/backups` - Backup storage location
+**NFS Implementation:**
+- **Deployment Method**: YAML-based (replaced unreliable Helm charts)
+- **Host Networking**: Uses host network for direct API server access
+- **Provisioner Pod**: Runs with appropriate RBAC permissions and environment variables
+- **Storage Classes**: Auto-creates both delete and retain policies
+- **Functional Verification**: Deployment includes PVC test to ensure provisioner works
+
+**NFS Exports Available:**
+- `/data/nfs/shared` (or `/mnt/nfs-storage/shared` in Vagrant) - General shared storage
+- `/data/nfs/data` (or `/mnt/nfs-storage/data` in Vagrant) - Application data storage  
+- `/data/nfs/backups` (or `/mnt/nfs-storage/backups` in Vagrant) - Backup storage location
+
+**Key Storage Features:**
+- **ReadWriteMany (RWX)**: NFS volumes can be mounted by multiple pods on different nodes
+- **Dynamic Provisioning**: Automatic volume creation and cleanup
+- **Cross-Node Access**: Any pod on any node can access the same NFS volume
+- **Environment Agnostic**: Works with any NFS path specified in configuration
 
 ## Development Guidelines
 
@@ -264,12 +298,91 @@ $agentArgs = Get-K3sAgentArgs -Config $Config -ServerURL "https://proxy:6443"
 - `Get-K3sServerArgs` - Generate server arguments with networking settings
 - `Get-K3sAgentArgs` - Generate agent arguments with pod limits
 
+## Testing and Verification Workflows
+
+### Complete End-to-End Testing (Recommended)
+```powershell
+# This workflow tests everything from VM creation to application deployment
+cd test/clusters/vagrant/minimal
+./vagrant-setup.ps1 destroy              # Clean slate (if needed)
+./vagrant-setup.ps1 up                   # Create VMs with NFS setup
+
+cd ../../../../setup
+./k3s-setup.ps1 -ConfigFile "../test/clusters/vagrant/minimal/vagrant-cluster.json"
+
+# Verify cluster is healthy
+kubectl get nodes                         # Should show 2 nodes Ready
+kubectl get pods -A                       # All system pods should be Running
+kubectl get sc                            # Should show nfs-client storage classes
+
+# Test NFS storage functionality
+cd ../test/apps
+./deploy-postgres-nfs.ps1 -Action deploy -Namespace demo-apps
+./deploy-postgres-nfs.ps1 -Action test -Namespace demo-apps
+
+# Clean up
+./deploy-postgres-nfs.ps1 -Action cleanup -Namespace demo-apps
+```
+
+### NFS Provisioner Troubleshooting
+```powershell
+# Check NFS provisioner pod status
+kubectl get pods -n nfs-provisioner
+kubectl logs -n nfs-provisioner deployment/nfs-client-provisioner
+
+# Verify NFS exports on master
+vagrant ssh k3s-master-1 -c "showmount -e localhost"
+
+# Test NFS mount manually
+kubectl create -f - <<EOF
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: test-nfs
+  namespace: default
+spec:
+  accessModes: ["ReadWriteMany"]
+  resources:
+    requests:
+      storage: 1Gi
+  storageClassName: nfs-client
+EOF
+
+# Check PVC status (should show Bound)
+kubectl get pvc test-nfs
+kubectl delete pvc test-nfs
+```
+
+### Common Issues and Solutions
+1. **NFS provisioner CrashLoopBackOff**: 
+   - Check NFS exports: `showmount -e <master-ip>`
+   - Verify NFS directories exist and have correct permissions
+   - Ensure YAML deployment includes host networking
+
+2. **PVC stuck in Pending**: 
+   - Check storage class exists: `kubectl get sc`
+   - Check provisioner pod logs: `kubectl logs -n nfs-provisioner deployment/nfs-client-provisioner`
+
+3. **Mount failures**: 
+   - Verify NFS path configuration matches between cluster config and actual NFS exports
+   - Check network connectivity between nodes
+
 ## Prerequisites
 
-- **PowerShell 5.1+** on deployment machine (Windows)
-- **10 Ubuntu VMs** (20.04/22.04 LTS) with static IP addresses
-- **SSH key authentication** configured for all nodes
+### For Local Testing (Vagrant)
+- **VirtualBox 7.1+** (ARM64 support) or **VMware Workstation/Fusion**
+- **Vagrant 2.3+** with VM provider plugins
+- **PowerShell 7+** (cross-platform, includes Windows PowerShell 5.1+)
+- **8GB+ RAM** available for VMs (1GB proxy + 2GB master + 1GB worker + host overhead)
+- **20GB+ disk space** for VM storage and container images
+
+### For Production/Remote Deployment  
+- **PowerShell 5.1+** on deployment machine (Windows, Linux, or macOS)
+- **Ubuntu VMs** (20.04/22.04 LTS recommended) - Minimum 3 VMs (1 proxy + 1 master + 1 worker)
+- **SSH key authentication** configured for all nodes (no password authentication)
 - **Network connectivity** between all nodes on same subnet
+- **Storage devices** on master nodes for NFS (optional if using existing storage)
+- **Static IP addresses** for all nodes (DHCP reservations acceptable)
 
 ## Security Features
 

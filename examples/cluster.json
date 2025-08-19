@@ -29,7 +29,8 @@
   },
   "storage": {
     "device": "/dev/sdb",
-    "nfsMountPath": "/data/nfs"
+    "nfsMountPath": "/data/nfs",
+    "nfsProvisionerPath": "/data/nfs/shared"
   },
   "ssh": {
     "user": "ubuntu",

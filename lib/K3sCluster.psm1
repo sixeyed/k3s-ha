@@ -71,6 +71,7 @@ function Load-ClusterConfig {
             # Storage configuration
             StorageDevice = $jsonContent.storage.device
             NFSMountPath = $jsonContent.storage.nfsMountPath
+            NFSProvisionerPath = $jsonContent.storage.nfsProvisionerPath
             
             # SSH configuration
             SSHUser = $jsonContent.ssh.user
@@ -125,6 +126,35 @@ function Get-SSHKeyForNode {
     
     # Add IP-based key
     $keysToTry += Join-Path $keyDir "${baseKeyName}_${Node}"
+    
+    # Add Vagrant machine-specific keys for local testing
+    # Try to find .vagrant directory relative to the SSH key directory
+    $vagrantDir = $keyDir
+    while ($vagrantDir -and $vagrantDir -ne (Split-Path $vagrantDir -Parent)) {
+        $vagrantPath = Join-Path $vagrantDir ".vagrant"
+        if (Test-Path $vagrantPath) {
+            # Map node IPs to Vagrant machine names
+            $machineName = $null
+            if ($Node -eq $Config.ProxyIP) {
+                $machineName = "k3s-proxy"
+            } elseif ($Config.MasterIPs -contains $Node) {
+                $masterIndex = $Config.MasterIPs.IndexOf($Node) + 1
+                $machineName = "k3s-master-$masterIndex"
+            } elseif ($Config.WorkerIPs -contains $Node) {
+                $workerIndex = $Config.WorkerIPs.IndexOf($Node) + 1
+                $machineName = "k3s-worker-$workerIndex"
+            }
+            
+            if ($machineName) {
+                $vagrantKey = Join-Path $vagrantPath "machines/$machineName/virtualbox/private_key"
+                if (Test-Path $vagrantKey) {
+                    $keysToTry += $vagrantKey
+                }
+            }
+            break
+        }
+        $vagrantDir = Split-Path $vagrantDir -Parent
+    }
     
     # Try each key until one works
     foreach ($keyPath in $keysToTry) {

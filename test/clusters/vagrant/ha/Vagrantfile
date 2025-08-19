@@ -1,0 +1,118 @@
+# -*- mode: ruby -*-
+# vi: set ft=ruby :
+
+# K3s HA Cluster - Production-like setup
+# 1x Proxy VM, 3x Master VMs, 2x Worker VMs (6 VMs total)
+
+Vagrant.configure("2") do |config|
+  # Bento box with ARM64 VirtualBox support
+  config.vm.box = "bento/ubuntu-22.04"
+  config.vm.box_version = "202508.03.0"
+  config.vm.box_architecture = "arm64"
+
+  # Disable automatic box update checking
+  config.vm.box_check_update = false
+
+  # Common provisioning script for all nodes
+  $common_script = <<-SCRIPT
+    # Update package lists
+    apt-get update
+
+    # Install required packages
+    apt-get install -y curl wget apt-transport-https ca-certificates
+
+    # Disable swap for Kubernetes
+    swapoff -a
+    sed -i '/ swap / s/^\(.*\)$/#\1/g' /etc/fstab
+
+    echo "Node setup complete: $(hostname)"
+    echo "Architecture: $(uname -m)"
+  SCRIPT
+
+  # Nginx Proxy VM
+  config.vm.define "k3s-proxy" do |proxy|
+    proxy.vm.hostname = "k3s-proxy"
+    proxy.vm.network "private_network", ip: "192.168.56.100"
+    
+    proxy.vm.provider "virtualbox" do |vb|
+      vb.memory = "512"
+      vb.cpus = 1
+      vb.gui = false
+      vb.name = "k3s-ha-proxy"
+    end
+
+    proxy.vm.provision "shell", inline: $common_script, args: ["proxy"]
+  end
+
+  # Master Node VMs
+  (1..3).each do |i|
+    config.vm.define "k3s-master-#{i}" do |master|
+      master.vm.hostname = "k3s-master-#{i}"
+      master.vm.network "private_network", ip: "192.168.56.#{9 + i}"
+      
+      master.vm.provider "virtualbox" do |vb|
+        vb.memory = "1536"
+        vb.cpus = 1
+        vb.gui = false
+        vb.name = "k3s-ha-master-#{i}"
+      end
+
+      master.vm.provision "shell", inline: $common_script, args: ["master"]
+      
+      # Add storage device for NFS (file-based for testing)
+      master.vm.provision "shell", inline: <<-SCRIPT
+        # Create a file-based storage device for testing
+        mkdir -p /data
+        truncate -s 10G /data/nfs-storage.img
+        mkfs.ext4 /data/nfs-storage.img
+        mkdir -p /mnt/nfs-storage
+        mount -o loop /data/nfs-storage.img /mnt/nfs-storage
+        echo "/data/nfs-storage.img /mnt/nfs-storage ext4 loop 0 0" >> /etc/fstab
+      SCRIPT
+    end
+  end
+
+  # Worker Node VMs
+  (1..2).each do |i|
+    config.vm.define "k3s-worker-#{i}" do |worker|
+      worker.vm.hostname = "k3s-worker-#{i}"
+      worker.vm.network "private_network", ip: "192.168.56.#{19 + i}"
+      
+      worker.vm.provider "virtualbox" do |vb|
+        vb.memory = "1024"
+        vb.cpus = 1
+        vb.gui = false
+        vb.name = "k3s-ha-worker-#{i}"
+      end
+
+      worker.vm.provision "shell", inline: $common_script, args: ["worker"]
+    end
+  end
+
+  # Message after all VMs are up
+  config.trigger.after :up do |trigger|
+    trigger.name = "K3s HA Cluster Ready"
+    trigger.info = <<-MSG
+
+    🎉 K3s HA Cluster VMs are ready!
+    
+    Next steps:
+    1. Deploy the cluster:
+       ../../vagrant-setup.ps1 -ClusterType ha -Action deploy
+    
+    2. Or deploy manually:
+       ../../../setup/k3s-setup.ps1 -ConfigFile ha-cluster.json
+    
+    VM Details:
+    - Proxy:   192.168.56.100 (k3s-ha-proxy)
+    - Master1: 192.168.56.10  (k3s-ha-master-1)  
+    - Master2: 192.168.56.11  (k3s-ha-master-2)
+    - Master3: 192.168.56.12  (k3s-ha-master-3)
+    - Worker1: 192.168.56.20  (k3s-ha-worker-1)
+    - Worker2: 192.168.56.21  (k3s-ha-worker-2)
+    
+    SSH: vagrant ssh [vm-name]
+    
+    MSG
+  end
+end

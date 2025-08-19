@@ -39,6 +39,25 @@ Vagrant.configure("2") do |config|
       mkdir -p /mnt/nfs-storage
       mount -o loop /data/nfs-storage.img /mnt/nfs-storage
       echo "/data/nfs-storage.img /mnt/nfs-storage ext4 loop 0 0" >> /etc/fstab
+      
+      # Create NFS subdirectories that the setup script expects
+      mkdir -p /mnt/nfs-storage/{shared,data,backups}
+      chmod 777 /mnt/nfs-storage/{shared,data,backups}
+      
+      # Install and configure NFS server
+      apt-get install -y nfs-kernel-server
+      
+      # Configure NFS exports
+      cat > /etc/exports << EOF
+/mnt/nfs-storage/shared  192.168.56.0/24(rw,sync,no_subtree_check,no_root_squash)
+/mnt/nfs-storage/data    192.168.56.0/24(rw,sync,no_subtree_check,no_root_squash)
+/mnt/nfs-storage/backups 192.168.56.0/24(rw,sync,no_subtree_check,no_root_squash)
+EOF
+      
+      # Start NFS server
+      systemctl enable nfs-kernel-server
+      systemctl restart nfs-kernel-server
+      exportfs -ra
     fi
 
     echo "Node setup complete: $(hostname)"

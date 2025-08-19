@@ -1,0 +1,49 @@
+{
+  "cluster": {
+    "name": "k3s-vagrant-test",
+    "version": "v1.31.1+k3s1"
+  },
+  "network": {
+    "proxyIP": "192.168.56.100",
+    "masterIPs": [
+      "192.168.56.10"
+    ],
+    "workerIPs": [
+      "192.168.56.20"
+    ]
+  },
+  "kubernetes": {
+    "serviceCIDR": "10.43.0.0/16",
+    "clusterCIDR": "10.42.0.0/16",
+    "clusterDNS": "10.43.0.10",
+    "clusterDomain": "cluster.local",
+    "nodePortRange": "30000-32767",
+    "maxPods": 50
+  },
+  "storage": {
+    "device": "/dev/sdc",
+    "nfsMountPath": "/mnt/nfs-storage",
+    "nfsProvisionerPath": "/mnt/nfs-storage/shared"
+  },
+  "ssh": {
+    "user": "vagrant", 
+    "keyPath": "ssh_keys/vagrant_rsa_k3s-master-1"
+  },
+  "k3s": {
+    "token": "k3s-ha-token-887061",
+    "disableServices": ["traefik"],
+    "tlsSans": [],
+    "extraArgs": {
+      "server": [
+        "--write-kubeconfig-mode=644",
+        "--kube-apiserver-arg=enable-admission-plugins=NodeRestriction"
+      ],
+      "agent": []
+    }
+  },
+  "operations": {
+    "drainTimeout": 180,
+    "upgradeStrategy": "rolling",
+    "backupRetention": 3
+  }
+}

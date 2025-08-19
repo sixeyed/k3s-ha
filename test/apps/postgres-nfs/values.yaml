@@ -10,7 +10,7 @@ auth:
 persistence:
   enabled: true
   storageClass: "nfs-client"
-  accessMode: ReadWriteOnce
+  accessMode: ReadWriteMany
   size: 2Gi
 
 service:

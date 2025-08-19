@@ -105,11 +105,16 @@ This repository provides a complete Infrastructure-as-Code solution for deployin
 - [cluster.json](/cluster.json) - Main configuration file for all cluster settings
 - [lib/K3sCluster.psm1](/lib/K3sCluster.psm1) - Shared PowerShell module with all cluster functions
 
-### Local Testing
-- [test/minimal-cluster/Vagrantfile](/test/minimal-cluster/Vagrantfile) - Local test environment (3 VMs)
-- [test/minimal-cluster/vagrant-cluster.json](/test/minimal-cluster/vagrant-cluster.json) - Vagrant-specific configuration
-- [test/minimal-cluster/vagrant-setup.ps1](/test/minimal-cluster/vagrant-setup.ps1) - Vagrant management script
-- [test/minimal-cluster/ssh_keys/](/test/minimal-cluster/ssh_keys) - Vagrant SSH keys (ignored by git)
+### Local Testing & Demo Apps
+- [test/clusters/vagrant/minimal/](/test/clusters/vagrant/minimal/) - Minimal test environment (3 VMs: proxy + master + worker)
+- [test/clusters/vagrant/minimal/Vagrantfile](/test/clusters/vagrant/minimal/Vagrantfile) - VirtualBox/VMware Vagrant configuration
+- [test/clusters/vagrant/minimal/vagrant-cluster.json](/test/clusters/vagrant/minimal/vagrant-cluster.json) - Vagrant-specific configuration
+- [test/clusters/vagrant/minimal/ssh_keys/](/test/clusters/vagrant/minimal/ssh_keys) - Vagrant SSH keys (auto-generated, ignored by git)
+- [test/apps/](/test/apps/) - Demo applications for testing cluster functionality
+  - `deploy-postgres-nfs.ps1` - PostgreSQL with NFS storage demo
+  - `deploy-redis-local.ps1` - Redis with local storage demo  
+  - `deploy-nginx-lb.ps1` - Nginx load balancer demo
+  - `deploy-all-demos.ps1` - Deploy and test all demo apps
 
 ### Initial Setup
 - [setup/k3s-setup.ps1](/setup/k3s-setup.ps1) - Main deployment script
@@ -142,46 +147,58 @@ This repository provides a complete Infrastructure-as-Code solution for deployin
 
 ### Minimal Cluster Setup with Vagrant
 
-The fastest way to test the deployment is using the included Vagrant environment:
+The fastest way to test the deployment is using the included Vagrant environment. This creates a complete working cluster that's perfect for testing and development:
 
 ```powershell
-# 1. Navigate to test directory
-cd test/minimal-cluster
+# 1. Navigate to minimal cluster directory
+cd test/clusters/vagrant/minimal
 
-# 2. Check prerequisites (Vagrant, VirtualBox, etc.)
-./vagrant-setup.ps1 prereqs
-
-# 3. Start VMs (creates 3 VMs: proxy + master + worker)
+# 2. Start VMs (creates 3 VMs: proxy + master + worker) 
 ./vagrant-setup.ps1 up
 
-# 4. Deploy K3s cluster 
-pwsh ../../setup/k3s-setup.ps1 -ConfigFile vagrant-cluster.json
-# Automatically deploys full cluster
+# 3. Deploy K3s cluster with NFS provisioner
+cd ../../../../setup
+./k3s-setup.ps1 -ConfigFile "../test/clusters/vagrant/minimal/vagrant-cluster.json"
+
+# 4. Test with demo apps
+cd ../test/apps
+./deploy-postgres-nfs.ps1 -Action deploy -Namespace demo-apps    # Test NFS storage
+./deploy-postgres-nfs.ps1 -Action test -Namespace demo-apps      # Verify functionality
 
 # 5. Verify cluster
 kubectl get nodes
 kubectl get pods -A
+kubectl get pvc,sc -n demo-apps  # Check storage
 ```
 
 **VM Management:**
 ```powershell
-./vagrant-setup.ps1 status                 # Check VM status
-./vagrant-setup.ps1 ssh -Node master      # SSH to master node
-./vagrant-setup.ps1 ssh -Node worker      # SSH to worker node
-./vagrant-setup.ps1 ssh -Node proxy       # SSH to proxy node
-./vagrant-setup.ps1 destroy               # Clean up everything
+cd test/clusters/vagrant/minimal
+./vagrant-setup.ps1 status      # Check VM status
+vagrant ssh k3s-master-1         # SSH to master node
+vagrant ssh k3s-worker-1         # SSH to worker node  
+vagrant ssh k3s-proxy            # SSH to proxy node
+./vagrant-setup.ps1 destroy      # Clean up everything
 ```
 
 **Test Environment Details:**
-- **Proxy**: 192.168.56.100 (k3s-proxy) - Nginx load balancer
-- **Master**: 192.168.56.10 (k3s-master-1) - K3s server + NFS storage
-- **Worker**: 192.168.56.20 (k3s-worker-1) - K3s agent
-- **SSH**: Automatically configured with Vagrant keys
-- **Storage**: NFS provisioner for persistent volumes
+- **Proxy**: 192.168.56.100 (k3s-proxy) - Nginx load balancer with status page
+- **Master**: 192.168.56.10 (k3s-master-1) - K3s server + integrated NFS server  
+- **Worker**: 192.168.56.20 (k3s-worker-1) - K3s agent for application workloads
+- **SSH**: Automatically configured with Vagrant keys (no manual setup required)
+- **Storage**: Full NFS dynamic provisioner with `nfs-client` and `nfs-client-retain` storage classes
+- **Networking**: Complete pod/service CIDR configuration with DNS
 
 **Platform Compatibility:**
 - ✅ **Intel Mac/Windows/Linux**: Full VirtualBox support
-- ⚠️ **Apple Silicon (ARM64)**: VirtualBox 7.1+ provides ARM64 support with Bento boxes
+- ✅ **Apple Silicon (ARM64)**: VirtualBox 7.1+ with Bento ubuntu-22.04 ARM64 boxes
+- ✅ **VMware**: Alternative to VirtualBox (configure in Vagrantfile)
+
+**Demo Applications:**
+Test the cluster with included demo apps that showcase different storage patterns:
+- **PostgreSQL + NFS**: Persistent database with shared storage (`nfs-client`)  
+- **Redis + Local**: High-performance cache with local storage (`local-path`)
+- **Nginx + LoadBalancer**: Web service with NodePort load balancing
 
 ### Testing with Remote VMs
 ```powershell
@@ -256,9 +273,17 @@ The cluster includes two storage options:
 - **NFS** (dynamic provisioning via master nodes)
 - **Local storage** (for high-performance workloads)
 
-Storage classes available:
-- `nfs-client` - Dynamic NFS with delete policy
-- `nfs-client-retain` - Dynamic NFS with retain policy
+**Storage Classes Available:**
+- `nfs-client` - Dynamic NFS provisioning with delete reclaim policy (data deleted when PVC is removed)
+- `nfs-client-retain` - Dynamic NFS provisioning with retain reclaim policy (data preserved when PVC is removed)  
+- `local-path` - Local node storage for high-performance workloads (default)
+
+**NFS Features:**
+- **Integrated NFS Server**: Runs directly on master nodes (no external dependencies)
+- **Dynamic Provisioning**: Automatic volume creation and management
+- **ReadWriteMany (RWX)**: Volumes can be mounted by multiple pods simultaneously
+- **Cross-Node Access**: Pods on any node can access the same NFS volume
+- **Backup Integration**: NFS data included in cluster backup procedures
 
 ## 🔍 Monitoring
 
