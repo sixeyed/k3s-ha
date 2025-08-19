@@ -11,19 +11,19 @@ This is a PowerShell-based Infrastructure-as-Code solution for deploying and man
 The cluster is highly configurable and supports various deployment sizes:
 
 **Production HA Setup (recommended):**
-- **1 Nginx Proxy VM** (10.0.1.100) - Load balances API traffic to masters
-- **3 Control Plane Nodes** (10.0.1.10-12) - Masters with integrated NFS storage
+- **1 Nginx Proxy VM** (10.0.1.100) - Load balances API traffic to control plane nodes
+- **3 Control Plane Nodes** (10.0.1.10-12) - Control plane nodes with integrated NFS storage
 - **6 Worker Nodes** (10.0.1.20-25) - Application workload nodes
 
 **Minimal Test Setup:**
 - **1 Nginx Proxy VM** - Load balancer
-- **1 Control Plane Node** - Single master with NFS storage  
+- **1 Control Plane Node** - Single control plane node with NFS storage  
 - **1 Worker Node** - Application workload node
 
 Key architectural decisions:
 - **Flexible scaling** - Deploy 1+1+1 for testing or 1+3+N for production
 - **No virtual IP dependency** - uses Nginx for HA instead
-- **Integrated NFS storage** - runs on master nodes for persistent volumes
+- **Integrated NFS storage** - runs on control plane nodes for persistent volumes
 - **Full Kubernetes networking control** - configurable CIDRs, DNS, pod limits
 - **All communication secured with TLS**
 - **Supports scaling** up to 100+ worker nodes
@@ -44,7 +44,7 @@ Key architectural decisions:
 # Step-by-step deployment options:
 ./setup/k3s-setup.ps1 -Action PrepareOnly     # Generate scripts only
 ./setup/k3s-setup.ps1 -Action ProxyOnly      # Deploy proxy only  
-./setup/k3s-setup.ps1 -Action MastersOnly    # Deploy masters only
+./setup/k3s-setup.ps1 -Action ControlPlaneOnly    # Deploy control plane nodes only
 ./setup/k3s-setup.ps1 -Action WorkersOnly    # Deploy workers only
 ./setup/k3s-setup.ps1 -Action ConfigureOnly  # Configure cluster only
 
@@ -60,7 +60,7 @@ Key architectural decisions:
 
 # Local testing with Vagrant (easiest for development - complete end-to-end workflow)
 cd test/clusters/vagrant/minimal
-./vagrant-setup.ps1 up        # Start 3 VMs with NFS setup (proxy + master + worker)
+./vagrant-setup.ps1 up        # Start 3 VMs with NFS setup (proxy + control plane + worker)
 
 # Deploy K3s cluster with YAML-based NFS provisioner
 cd ../../../../setup
@@ -85,8 +85,8 @@ cd ../clusters/vagrant/minimal
 # Add a new worker node
 ./operations/k3s-add-node.ps1 -NodeType worker -NewNodeIP "10.0.1.26"
 
-# Add a new master node  
-./operations/k3s-add-node.ps1 -NodeType master -NewNodeIP "10.0.1.13"
+# Add a new control plane node  
+./operations/k3s-add-node.ps1 -NodeType control-plane -NewNodeIP "10.0.1.13"
 
 # Use custom configuration file
 ./operations/k3s-add-node.ps1 -NodeType worker -NewNodeIP "10.0.1.26" -ConfigFile "staging-cluster.json"
@@ -129,7 +129,7 @@ Start-Process "http://10.0.1.100/"
 # Check Nginx logs
 ssh ubuntu@10.0.1.100 "sudo tail -f /var/log/nginx/k3s-access.log"
 
-# Check K3s service logs on masters
+# Check K3s service logs on control plane nodes
 ssh ubuntu@10.0.1.10 "sudo journalctl -u k3s -f"
 
 # Check NFS exports
@@ -144,7 +144,7 @@ ssh ubuntu@10.0.1.10 "showmount -e localhost"
   - `config/` - Generated deployment configuration files (ignored by git)
   
 - **operations/** - Day 2 operational scripts
-  - `k3s-add-node.ps1` - Add new master or worker nodes
+  - `k3s-add-node.ps1` - Add new control plane or worker nodes
   - `k3s-upgrade-cluster.ps1` - Rolling cluster upgrades
   - `k3s-certificate-renewal.ps1` - TLS certificate management
   - `k3s-backup-restore.ps1` - Backup and restore procedures
@@ -203,6 +203,7 @@ All configuration is centralized in JSON files, with `cluster.json` as the defau
   },
   "k3s": {
     "token": null,
+    "taintControlPlane": true,
     "disableServices": ["traefik"],
     "tlsSans": [],
     "extraArgs": {
@@ -226,6 +227,11 @@ All configuration is centralized in JSON files, with `cluster.json` as the defau
 - **Path Expansion**: SSH key paths support `~` expansion
 - **Validation**: Configuration loading includes error handling and validation
 - **Extensible**: Add custom K3s arguments for servers and agents
+
+**Control Plane Node Scheduling:**
+- **`taintControlPlane: true`** - Control plane nodes are tainted to prevent regular workload scheduling (recommended for HA production)
+- **`taintControlPlane: false`** - Control plane nodes can run any workloads (recommended for minimal/dev clusters)
+- Uses standard Kubernetes taint: `node-role.kubernetes.io/control-plane:NoSchedule`
 
 **Multiple Environments:**
 - Create separate config files: `staging-cluster.json`, `production-cluster.json`

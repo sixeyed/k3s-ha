@@ -17,7 +17,7 @@ param(
     [bool]$SetKubectlContext = $true,
     
     [Parameter(Mandatory=$false)]
-    [ValidateSet("Deploy", "PrepareOnly", "ProxyOnly", "MastersOnly", "WorkersOnly", "ConfigureOnly", "ImportKubeConfig")]
+    [ValidateSet("Deploy", "PrepareOnly", "ProxyOnly", "ControlPlaneOnly", "WorkersOnly", "ConfigureOnly", "ImportKubeConfig")]
     [string]$Action = "Deploy"
 )
 
@@ -153,7 +153,7 @@ cat > /var/www/html/index.html << 'HTML_EOF'
         <ul>
             <li>Proxy Endpoint: https://###PROXY_IP###:6443</li>
             <li>Load Balancing: Least Connections</li>
-            <li>Backend Masters: 10.0.1.10, 10.0.1.11, 10.0.1.12</li>
+            <li>Backend Control Plane Nodes: 10.0.1.10, 10.0.1.11, 10.0.1.12</li>
             <li>Health Check: Every 5 seconds</li>
         </ul>
     </div>
@@ -180,12 +180,12 @@ echo "Nginx proxy setup complete!"
 # MASTER NODE SETUP SCRIPT
 #########################################
 
-$MasterSetupScript = @'
+$ControlPlaneSetupScript = @'
 #!/bin/bash
-# K3s Master Setup Script with NFS Storage
+# K3s Control Plane Node Setup Script with NFS Storage
 
-MASTER_NUMBER=$1
-FIRST_MASTER_IP=$2
+NODE_NUMBER=$1
+FIRST_CONTROL_PLANE_IP=$2
 K3S_TOKEN=$3
 K3S_VERSION=$4
 STORAGE_DEVICE=$5
@@ -193,7 +193,7 @@ NFS_MOUNT_PATH=$6
 K3S_SERVER_ARGS="$7"
 NETWORK_SUBNET="$8"
 
-echo "Setting up K3s Master Node $MASTER_NUMBER"
+echo "Setting up K3s Control Plane Node $NODE_NUMBER"
 
 # Update system
 apt-get update
@@ -253,17 +253,17 @@ systemctl restart nfs-kernel-server
 exportfs -ra
 
 # Install K3s
-if [ "$MASTER_NUMBER" -eq 1 ]; then
-    echo "Installing first K3s master"
+if [ "$NODE_NUMBER" -eq 1 ]; then
+    echo "Installing first K3s control plane node"
     echo "K3s args: $K3S_SERVER_ARGS"
     eval "curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION=$K3S_VERSION sh -s - server $K3S_SERVER_ARGS"
 else
-    echo "Installing additional K3s master"
-    echo "K3s args: --server https://${FIRST_MASTER_IP}:6443 $K3S_SERVER_ARGS"
-    eval "curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION=$K3S_VERSION sh -s - server --server https://${FIRST_MASTER_IP}:6443 $K3S_SERVER_ARGS"
+    echo "Installing additional K3s control plane node"
+    echo "K3s args: --server https://${FIRST_CONTROL_PLANE_IP}:6443 $K3S_SERVER_ARGS"
+    eval "curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION=$K3S_VERSION sh -s - server --server https://${FIRST_CONTROL_PLANE_IP}:6443 $K3S_SERVER_ARGS"
 fi
 
-echo "Master setup complete!"
+echo "Control plane node setup complete!"
 '@
 
 #########################################
@@ -578,7 +578,7 @@ function Deploy-Scripts {
     # Save scripts locally in config directory
     $NginxConfigFinal | Out-File -FilePath "$configDir/nginx.conf" -Encoding UTF8
     $ProxySetupFinal | Out-File -FilePath "$configDir/setup-proxy.sh" -Encoding UTF8
-    $MasterSetupScript | Out-File -FilePath "$configDir/setup-master.sh" -Encoding UTF8
+    $ControlPlaneSetupScript | Out-File -FilePath "$configDir/setup-control-plane.sh" -Encoding UTF8
     $WorkerSetupScript | Out-File -FilePath "$configDir/setup-worker.sh" -Encoding UTF8
     Write-Host "  ✓ Generated deployment configuration files" -ForegroundColor Green
     
@@ -609,19 +609,19 @@ function Setup-ProxyNode {
     Write-Host "Proxy setup complete!" -ForegroundColor Green
 }
 
-# Function to setup masters
-function Setup-MasterNodes {
-    Write-Host "`n=== Setting up Master Nodes ===" -ForegroundColor Green
+# Function to setup control plane nodes
+function Setup-ControlPlaneNodes {
+    Write-Host "`n=== Setting up Control Plane Nodes ===" -ForegroundColor Green
     
     for ($i = 0; $i -lt $Config.MasterIPs.Count; $i++) {
         $masterIP = $Config.MasterIPs[$i]
-        $masterNumber = $i + 1
+        $nodeNumber = $i + 1
         $isFirstServer = $i -eq 0
         
-        Write-Host "`nSetting up Master $masterNumber ($masterIP)..." -ForegroundColor Yellow
+        Write-Host "`nSetting up Control Plane Node $nodeNumber ($masterIP)..." -ForegroundColor Yellow
         
         # Generate K3s server arguments using the module function
-        $k3sServerArgs = Get-K3sServerArgs -Config $Config -IsFirstServer:$isFirstServer
+        $k3sServerArgs = Get-K3sServerArgs -Config $Config -IsFirstServer:$isFirstServer -NodeIP $masterIP
         if (-not $isFirstServer) {
             # Remove cluster-init for additional servers (it's handled in the script)
             $k3sServerArgs = $k3sServerArgs -replace "--cluster-init\s*", ""
@@ -630,25 +630,52 @@ function Setup-MasterNodes {
         Write-Host "  K3s server arguments: $k3sServerArgs" -ForegroundColor Cyan
         
         # Copy setup script
-        Copy-FileToNode -Config $Config -Node $masterIP -LocalPath "$PSScriptRoot/config/setup-master.sh" -RemotePath "/tmp/setup-master.sh"
+        Copy-FileToNode -Config $Config -Node $masterIP -LocalPath "$PSScriptRoot/config/setup-control-plane.sh" -RemotePath "/tmp/setup-control-plane.sh"
         
         # Execute setup script in two steps to avoid complex quoting issues
-        $chmodCmd = "chmod +x /tmp/setup-master.sh"
+        $chmodCmd = "chmod +x /tmp/setup-control-plane.sh"
         Invoke-SSHCommand -Config $Config -Node $masterIP -Command $chmodCmd
         
         $networkSubnet = Get-NetworkSubnet -IPAddress $Config.MasterIPs[0]
-        $setupCmd = "sudo /tmp/setup-master.sh $masterNumber $($Config.MasterIPs[0]) $($Config.K3sToken) $($Config.K3sVersion) $($Config.StorageDevice) $($Config.NFSMountPath) '$k3sServerArgs' '$networkSubnet'"
+        $setupCmd = "sudo /tmp/setup-control-plane.sh $nodeNumber $($Config.MasterIPs[0]) $($Config.K3sToken) $($Config.K3sVersion) $($Config.StorageDevice) $($Config.NFSMountPath) '$k3sServerArgs' '$networkSubnet'"
         Invoke-SSHCommand -Config $Config -Node $masterIP -Command $setupCmd
         
+        # Wait for this master to be ready before proceeding to the next one
+        Write-Host "  Waiting for Control Plane Node $nodeNumber to be ready..." -ForegroundColor Cyan
+        $timeout = 120  # 2 minutes timeout
+        $elapsed = 0
+        $ready = $false
+        
+        while ($elapsed -lt $timeout -and -not $ready) {
+            Start-Sleep -Seconds 10
+            $elapsed += 10
+            
+            # Check if K3s service is running
+            $serviceStatus = Invoke-SSHCommand -Config $Config -Node $masterIP -Command "systemctl is-active k3s"
+            if ($serviceStatus -eq "active") {
+                Write-Host "  ✓ Control Plane Node $nodeNumber is ready!" -ForegroundColor Green
+                $ready = $true
+            } else {
+                Write-Host "  ⏳ Control Plane Node $nodeNumber still starting... ($elapsed/$timeout seconds)" -ForegroundColor Yellow
+            }
+        }
+        
+        if (-not $ready) {
+            Write-Host "  ⚠️ Control Plane Node $nodeNumber did not become ready within $timeout seconds" -ForegroundColor Red
+            # Continue anyway, but with a warning
+        }
+        
+        # Additional delay for HA control plane nodes to ensure etcd is stable
         if ($i -eq 0) {
-            Write-Host "Waiting for first master to initialize..." -ForegroundColor Cyan
-            Start-Sleep -Seconds 30
-        } else {
+            Write-Host "  Allowing additional time for first control plane node etcd initialization..." -ForegroundColor Cyan
             Start-Sleep -Seconds 20
+        } elseif ($i -gt 0) {
+            Write-Host "  Allowing time for etcd cluster membership..." -ForegroundColor Cyan
+            Start-Sleep -Seconds 15
         }
     }
     
-    Write-Host "All masters setup complete!" -ForegroundColor Green
+    Write-Host "All control plane nodes setup complete!" -ForegroundColor Green
 }
 
 # Function to setup workers
@@ -1112,20 +1139,20 @@ function Start-Deployment {
     param(
         [switch]$PrepareOnly,
         [switch]$ProxyOnly,
-        [switch]$MastersOnly,
+        [switch]$ControlPlaneOnly,
         [switch]$WorkersOnly,
         [switch]$ConfigureOnly
     )
     
-    if ($PrepareOnly -or !($ProxyOnly -or $MastersOnly -or $WorkersOnly -or $ConfigureOnly)) {
+    if ($PrepareOnly -or !($ProxyOnly -or $ControlPlaneOnly -or $WorkersOnly -or $ConfigureOnly)) {
         Deploy-Scripts
     }
     
     if (!$PrepareOnly) {
         if ($ProxyOnly) {
             Setup-ProxyNode
-        } elseif ($MastersOnly) {
-            Setup-MasterNodes
+        } elseif ($ControlPlaneOnly) {
+            Setup-ControlPlaneNodes
         } elseif ($WorkersOnly) {
             Setup-WorkerNodes
         } elseif ($ConfigureOnly) {
@@ -1134,7 +1161,7 @@ function Start-Deployment {
         } else {
             # Full deployment
             Setup-ProxyNode
-            Setup-MasterNodes
+            Setup-ControlPlaneNodes
             Setup-WorkerNodes
             Configure-Cluster
             Test-Cluster
@@ -1169,7 +1196,7 @@ switch ($Action) {
     "Deploy" { Start-Deployment }
     "PrepareOnly" { Start-Deployment -PrepareOnly }
     "ProxyOnly" { Start-Deployment -ProxyOnly }
-    "MastersOnly" { Start-Deployment -MastersOnly }
+    "ControlPlaneOnly" { Start-Deployment -ControlPlaneOnly }
     "WorkersOnly" { Start-Deployment -WorkersOnly }
     "ConfigureOnly" { Start-Deployment -ConfigureOnly }
     "ImportKubeConfig" { Import-KubeConfig }

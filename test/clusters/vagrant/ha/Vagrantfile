@@ -15,15 +15,49 @@ Vagrant.configure("2") do |config|
 
   # Common provisioning script for all nodes
   $common_script = <<-SCRIPT
-    # Update package lists
+    # Update system
     apt-get update
+    apt-get upgrade -y
 
     # Install required packages
     apt-get install -y curl wget apt-transport-https ca-certificates
 
     # Disable swap for Kubernetes
     swapoff -a
-    sed -i '/ swap / s/^\(.*\)$/#\1/g' /etc/fstab
+    sed -i '/ swap / s/^\\(.*\\)$/#\\1/g' /etc/fstab
+
+    # Allow passwordless sudo for vagrant user
+    echo "vagrant ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
+
+    # Add storage device for NFS (only on master nodes)
+    if [ "$1" = "master" ]; then
+      # Create a file-based storage device for testing
+      mkdir -p /data
+      truncate -s 10G /data/nfs-storage.img
+      mkfs.ext4 /data/nfs-storage.img
+      mkdir -p /mnt/nfs-storage
+      mount -o loop /data/nfs-storage.img /mnt/nfs-storage
+      echo "/data/nfs-storage.img /mnt/nfs-storage ext4 loop 0 0" >> /etc/fstab
+      
+      # Create NFS subdirectories that the setup script expects
+      mkdir -p /mnt/nfs-storage/{shared,data,backups}
+      chmod 777 /mnt/nfs-storage/{shared,data,backups}
+      
+      # Install and configure NFS server
+      apt-get install -y nfs-kernel-server
+      
+      # Configure NFS exports
+      cat > /etc/exports << EOF
+/mnt/nfs-storage/shared  192.168.56.0/24(rw,sync,no_subtree_check,no_root_squash)
+/mnt/nfs-storage/data    192.168.56.0/24(rw,sync,no_subtree_check,no_root_squash)
+/mnt/nfs-storage/backups 192.168.56.0/24(rw,sync,no_subtree_check,no_root_squash)
+EOF
+      
+      # Start NFS server
+      systemctl enable nfs-kernel-server
+      systemctl restart nfs-kernel-server
+      exportfs -ra
+    fi
 
     echo "Node setup complete: $(hostname)"
     echo "Architecture: $(uname -m)"
@@ -35,7 +69,7 @@ Vagrant.configure("2") do |config|
     proxy.vm.network "private_network", ip: "192.168.56.100"
     
     proxy.vm.provider "virtualbox" do |vb|
-      vb.memory = "512"
+      vb.memory = "1024"
       vb.cpus = 1
       vb.gui = false
       vb.name = "k3s-ha-proxy"
@@ -51,24 +85,13 @@ Vagrant.configure("2") do |config|
       master.vm.network "private_network", ip: "192.168.56.#{9 + i}"
       
       master.vm.provider "virtualbox" do |vb|
-        vb.memory = "1536"
-        vb.cpus = 1
+        vb.memory = "2048"
+        vb.cpus = 2
         vb.gui = false
         vb.name = "k3s-ha-master-#{i}"
       end
 
       master.vm.provision "shell", inline: $common_script, args: ["master"]
-      
-      # Add storage device for NFS (file-based for testing)
-      master.vm.provision "shell", inline: <<-SCRIPT
-        # Create a file-based storage device for testing
-        mkdir -p /data
-        truncate -s 10G /data/nfs-storage.img
-        mkfs.ext4 /data/nfs-storage.img
-        mkdir -p /mnt/nfs-storage
-        mount -o loop /data/nfs-storage.img /mnt/nfs-storage
-        echo "/data/nfs-storage.img /mnt/nfs-storage ext4 loop 0 0" >> /etc/fstab
-      SCRIPT
     end
   end
 

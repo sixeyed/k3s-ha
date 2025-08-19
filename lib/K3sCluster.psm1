@@ -81,6 +81,9 @@ function Load-ClusterConfig {
             DrainTimeout = $jsonContent.operations.drainTimeout
             UpgradeStrategy = $jsonContent.operations.upgradeStrategy
             BackupRetention = $jsonContent.operations.backupRetention
+            
+            # Control plane scheduling configuration
+            TaintControlPlane = if ($null -ne $jsonContent.k3s.taintControlPlane) { $jsonContent.k3s.taintControlPlane } else { $false }
         }
     }
     catch {
@@ -238,10 +241,20 @@ function Get-K3sServerArgs {
         [Parameter(Mandatory=$true)]
         [hashtable]$Config,
         [Parameter(Mandatory=$false)]
-        [switch]$IsFirstServer
+        [switch]$IsFirstServer,
+        [Parameter(Mandatory=$false)]
+        [string]$NodeIP
     )
     
     $args = @()
+    
+    # Node IP binding (essential for multi-master HA)
+    if ($NodeIP) {
+        $args += "--node-ip=$NodeIP"
+        $args += "--node-external-ip=$NodeIP"
+        $args += "--bind-address=$NodeIP"
+        $args += "--advertise-address=$NodeIP"
+    }
     
     # Kubernetes networking arguments
     if ($Config.ServiceCIDR) {
@@ -304,6 +317,11 @@ function Get-K3sServerArgs {
     # First server gets cluster-init, others join
     if ($IsFirstServer) {
         $args += "--cluster-init"
+    }
+    
+    # Taint control plane nodes to prevent workload scheduling if configured
+    if ($Config.TaintControlPlane -eq $true) {
+        $args += "--node-taint=node-role.kubernetes.io/control-plane:NoSchedule"
     }
     
     return $args -join " "

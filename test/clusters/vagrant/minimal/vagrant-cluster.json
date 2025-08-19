@@ -31,6 +31,7 @@
   },
   "k3s": {
     "token": "k3s-ha-token-887061",
+    "taintControlPlane": false,
     "disableServices": ["traefik"],
     "tlsSans": [],
     "extraArgs": {
