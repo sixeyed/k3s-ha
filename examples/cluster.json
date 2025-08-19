@@ -5,7 +5,7 @@
   },
   "network": {
     "proxyIP": "10.0.1.100",
-    "masterIPs": [
+    "controlPlaneIPs": [
       "10.0.1.10",
       "10.0.1.11", 
       "10.0.1.12"
@@ -38,6 +38,7 @@
   },
   "k3s": {
     "token": null,
+    "taintControlPlane": true,
     "disableServices": ["traefik"],
     "tlsSans": [],
     "extraArgs": {

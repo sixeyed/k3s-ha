@@ -2,7 +2,7 @@
 # vi: set ft=ruby :
 
 # K3s HA Cluster VirtualBox Configuration (ARM64)
-# Creates a minimal cluster for testing: 1 proxy + 1 master + 1 worker
+# Creates a minimal cluster for testing: 1 proxy + 1 control plane + 1 worker
 # Based on working VirtualBox ARM64 setup
 
 Vagrant.configure("2") do |config|
@@ -30,8 +30,8 @@ Vagrant.configure("2") do |config|
     # Allow passwordless sudo for vagrant user
     echo "vagrant ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
 
-    # Add storage device for NFS (only on master nodes)
-    if [ "$1" = "master" ]; then
+    # Add storage device for NFS (only on control plane nodes)
+    if [ "$1" = "control-plane" ]; then
       # Create a file-based storage device for testing
       mkdir -p /data
       truncate -s 10G /data/nfs-storage.img
@@ -79,19 +79,19 @@ EOF
     proxy.vm.provision "shell", inline: $common_script, args: ["proxy"]
   end
 
-  # Master Node VM
-  config.vm.define "k3s-master-1" do |master|
-    master.vm.hostname = "k3s-master-1"
-    master.vm.network "private_network", ip: "192.168.56.10"
+  # Control Plane Node VM
+  config.vm.define "k3s-control-plane-1" do |control_plane|
+    control_plane.vm.hostname = "k3s-control-plane-1"
+    control_plane.vm.network "private_network", ip: "192.168.56.10"
     
-    master.vm.provider "virtualbox" do |vb|
+    control_plane.vm.provider "virtualbox" do |vb|
       vb.memory = "2048"
       vb.cpus = 2
       vb.gui = false
-      vb.name = "k3s-master-1"
+      vb.name = "k3s-control-plane-1"
     end
 
-    master.vm.provision "shell", inline: $common_script, args: ["master"]
+    control_plane.vm.provision "shell", inline: $common_script, args: ["control-plane"]
   end
 
   # Worker Node VM
@@ -125,7 +125,7 @@ EOF
     
     VM Details:
     - Proxy:  192.168.56.100 (k3s-proxy)
-    - Master: 192.168.56.10  (k3s-master-1)  
+    - Control Plane: 192.168.56.10  (k3s-control-plane-1)  
     - Worker: 192.168.56.20  (k3s-worker-1)
     
     SSH: vagrant ssh [vm-name]

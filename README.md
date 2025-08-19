@@ -17,7 +17,7 @@ This repository provides a complete Infrastructure-as-Code solution for deployin
     ┌────┴────┬─────────┐
     │         │         │
 ┌───▼───┐ ┌──▼───┐ ┌──▼───┐
-│Master1│ │Master2│ │Master3│ (10.0.1.10-12)
+│ CP-1  │ │ CP-2  │ │ CP-3  │ (10.0.1.10-12)
 │ +NFS  │ │ +NFS  │ │ +NFS  │ (4CPU/16GB + 500GB storage)
 └───┬───┘ └───┬───┘ └───┬───┘
     │         │         │
@@ -33,10 +33,10 @@ This repository provides a complete Infrastructure-as-Code solution for deployin
 
 ### Key Features
 
-- **High Availability**: 3 master nodes with automatic failover (configurable 1-N masters)
+- **High Availability**: 3 control plane nodes with automatic failover (configurable 1-N control plane nodes)
 - **No Virtual IP Required**: Uses Nginx proxy for load balancing
 - **Environment Agnostic**: Works with any SSH-accessible infrastructure (bare metal, cloud VMs, Vagrant)
-- **Integrated Storage**: NFS running on master nodes with dynamic provisioning
+- **Integrated Storage**: NFS running on control plane nodes with dynamic provisioning
 - **Kubernetes Network Control**: Configure pod/service CIDRs, DNS, and networking
 - **Centralized Configuration**: JSON-based config with environment support
 - **Production Ready**: Includes monitoring, backup, and upgrade procedures
@@ -52,11 +52,11 @@ This repository provides a complete Infrastructure-as-Code solution for deployin
 - **8GB+ RAM** and **20GB+ disk space** for VMs
 
 ### For Production/Remote Deployment
-- **Ubuntu VMs** (20.04/22.04 LTS recommended) - Minimum 3 VMs (1 proxy + 1 master + 1 worker), recommended 10 VMs for HA
+- **Ubuntu VMs** (20.04/22.04 LTS recommended) - Minimum 3 VMs (1 proxy + 1 control plane + 1 worker), recommended 10 VMs for HA
 - **PowerShell 5.1+** on deployment machine (Windows, Linux, or macOS)
 - **SSH key authentication** configured for all nodes
 - **Network connectivity** between all nodes
-- **Storage devices** on master nodes (for NFS, optional if using existing storage)
+- **Storage devices** on control plane nodes (for NFS, optional if using existing storage)
 
 ## 🚀 Quick Start
 
@@ -72,7 +72,7 @@ This repository provides a complete Infrastructure-as-Code solution for deployin
    {
      "network": {
        "proxyIP": "10.0.1.100",
-       "masterIPs": ["10.0.1.10", "10.0.1.11", "10.0.1.12"],
+       "controlPlaneIPs": ["10.0.1.10", "10.0.1.11", "10.0.1.12"],
        "workerIPs": ["10.0.1.20", "10.0.1.21", "10.0.1.22", "10.0.1.23", "10.0.1.24", "10.0.1.25"]
      },
      "kubernetes": {
@@ -106,7 +106,7 @@ This repository provides a complete Infrastructure-as-Code solution for deployin
 - [lib/K3sCluster.psm1](/lib/K3sCluster.psm1) - Shared PowerShell module with all cluster functions
 
 ### Local Testing & Demo Apps
-- [test/clusters/vagrant/minimal/](/test/clusters/vagrant/minimal/) - Minimal test environment (3 VMs: proxy + master + worker)
+- [test/clusters/vagrant/minimal/](/test/clusters/vagrant/minimal/) - Minimal test environment (3 VMs: proxy + control plane + worker)
 - [test/clusters/vagrant/minimal/Vagrantfile](/test/clusters/vagrant/minimal/Vagrantfile) - VirtualBox/VMware Vagrant configuration
 - [test/clusters/vagrant/minimal/vagrant-cluster.json](/test/clusters/vagrant/minimal/vagrant-cluster.json) - Vagrant-specific configuration
 - [test/clusters/vagrant/minimal/ssh_keys/](/test/clusters/vagrant/minimal/ssh_keys) - Vagrant SSH keys (auto-generated, ignored by git)
@@ -153,7 +153,7 @@ The fastest way to test the deployment is using the included Vagrant environment
 # 1. Navigate to minimal cluster directory
 cd test/clusters/vagrant/minimal
 
-# 2. Start VMs (creates 3 VMs: proxy + master + worker) 
+# 2. Start VMs (creates 3 VMs: proxy + control plane + worker) 
 ./vagrant-setup.ps1 up
 
 # 3. Deploy K3s cluster with NFS provisioner
@@ -175,7 +175,7 @@ kubectl get pvc,sc -n demo-apps  # Check storage
 ```powershell
 cd test/clusters/vagrant/minimal
 ./vagrant-setup.ps1 status      # Check VM status
-vagrant ssh k3s-master-1         # SSH to master node
+vagrant ssh k3s-control-plane-1  # SSH to control plane node
 vagrant ssh k3s-worker-1         # SSH to worker node  
 vagrant ssh k3s-proxy            # SSH to proxy node
 ./vagrant-setup.ps1 destroy      # Clean up everything
@@ -183,7 +183,7 @@ vagrant ssh k3s-proxy            # SSH to proxy node
 
 **Test Environment Details:**
 - **Proxy**: 192.168.56.100 (k3s-proxy) - Nginx load balancer with status page
-- **Master**: 192.168.56.10 (k3s-master-1) - K3s server + integrated NFS server  
+- **Control Plane**: 192.168.56.10 (k3s-control-plane-1) - K3s server + integrated NFS server  
 - **Worker**: 192.168.56.20 (k3s-worker-1) - K3s agent for application workloads
 - **SSH**: Automatically configured with Vagrant keys (no manual setup required)
 - **Storage**: Full NFS dynamic provisioner with `nfs-client` and `nfs-client-retain` storage classes
@@ -202,7 +202,7 @@ Test the cluster with included demo apps that showcase different storage pattern
 
 ### Testing with Remote VMs
 ```powershell
-# Deploy a minimal cluster (1 proxy + 1 master + 1 worker) for testing
+# Deploy a minimal cluster (1 proxy + 1 control plane + 1 worker) for testing
 ./test-config.ps1 -ConfigFile "test-cluster.json"  # Validate configuration
 ./setup/k3s-setup.ps1 -ConfigFile "test-cluster.json"
 ```
@@ -216,7 +216,7 @@ Test the cluster with included demo apps that showcase different storage pattern
 # Step-by-step deployment options
 ./setup/k3s-setup.ps1 -Action PrepareOnly        # Generate scripts only
 ./setup/k3s-setup.ps1 -Action ProxyOnly         # Deploy proxy only
-./setup/k3s-setup.ps1 -Action MastersOnly       # Deploy masters only
+./setup/k3s-setup.ps1 -Action ControlPlaneOnly  # Deploy control plane nodes only
 ./setup/k3s-setup.ps1 -Action WorkersOnly       # Deploy workers only
 ./setup/k3s-setup.ps1 -Action ConfigureOnly     # Configure cluster only
 
@@ -270,7 +270,7 @@ The cluster provides full control over Kubernetes networking through the configu
 ## 💾 Storage
 
 The cluster includes two storage options:
-- **NFS** (dynamic provisioning via master nodes)
+- **NFS** (dynamic provisioning via control plane nodes)
 - **Local storage** (for high-performance workloads)
 
 **Storage Classes Available:**
@@ -279,7 +279,7 @@ The cluster includes two storage options:
 - `local-path` - Local node storage for high-performance workloads (default)
 
 **NFS Features:**
-- **Integrated NFS Server**: Runs directly on master nodes (no external dependencies)
+- **Integrated NFS Server**: Runs directly on control plane nodes (no external dependencies)
 - **Dynamic Provisioning**: Automatic volume creation and management
 - **ReadWriteMany (RWX)**: Volumes can be mounted by multiple pods simultaneously
 - **Cross-Node Access**: Pods on any node can access the same NFS volume
@@ -303,7 +303,7 @@ ssh ubuntu@node-ip "sudo journalctl -u k3s -n 100"
 ### Storage Issues
 ```powershell
 # Check NFS exports
-ssh ubuntu@master-ip "showmount -e localhost"
+ssh ubuntu@control-plane-ip "showmount -e localhost"
 ```
 
 ### Proxy Issues

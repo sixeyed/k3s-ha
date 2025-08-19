@@ -155,7 +155,7 @@ Get-Content "renew-certs.sh" -Raw | ForEach-Object { $_ -replace "`r`n", "`n" } 
 # Check certificates on all nodes
 Write-Host "`n=== Checking Certificate Status ===" -ForegroundColor Green
 
-$allNodes = $Config.MasterIPs + $Config.WorkerIPs
+$allNodes = $Config.ControlPlaneIPs + $Config.WorkerIPs
 $nodesNeedingRenewal = @()
 
 foreach ($node in $allNodes) {
@@ -204,24 +204,24 @@ if ($nodesNeedingRenewal.Count -eq 0 -and -not $Force) {
         exit 0
     }
     
-    # Renew certificates on master nodes first
-    Write-Host "`n--- Renewing Master Node Certificates ---" -ForegroundColor Cyan
-    foreach ($master in $Config.MasterIPs) {
-        if ($nodesNeedingRenewal -contains $master -or $Force) {
-            Write-Host "`nRenewing certificates on master $master..." -ForegroundColor Yellow
+    # Renew certificates on control plane nodes first
+    Write-Host "`n--- Renewing Control Plane Node Certificates ---" -ForegroundColor Cyan
+    foreach ($controlPlaneNode in $Config.ControlPlaneIPs) {
+        if ($nodesNeedingRenewal -contains $controlPlaneNode -or $Force) {
+            Write-Host "`nRenewing certificates on control plane node $controlPlaneNode..." -ForegroundColor Yellow
             
-            Copy-FileToNode -Config $Config -Node $master -LocalPath "renew-certs.sh" -RemotePath "/tmp/renew-certs.sh"
-            Invoke-SSHCommand -Config $Config -Node $master -Command "chmod +x /tmp/renew-certs.sh && sudo /tmp/renew-certs.sh"
+            Copy-FileToNode -Config $Config -Node $controlPlaneNode -LocalPath "renew-certs.sh" -RemotePath "/tmp/renew-certs.sh"
+            Invoke-SSHCommand -Config $Config -Node $controlPlaneNode -Command "chmod +x /tmp/renew-certs.sh && sudo /tmp/renew-certs.sh"
             
             # Wait for cluster to stabilize
             Start-Sleep -Seconds 30
             
-            # Verify master is healthy
-            $masterHealth = Invoke-SSHCommand -Node $master -Command "sudo k3s kubectl get nodes | grep $(hostname)"
-            if ($masterHealth -match "Ready") {
-                Write-Host "✓ Master $master is healthy after renewal" -ForegroundColor Green
+            # Verify control plane node is healthy
+            $controlPlaneHealth = Invoke-SSHCommand -Config $Config -Node $controlPlaneNode -Command "sudo k3s kubectl get nodes | grep $(hostname)"
+            if ($controlPlaneHealth -match "Ready") {
+                Write-Host "✓ Control plane node $controlPlaneNode is healthy after renewal" -ForegroundColor Green
             } else {
-                Write-Host "✗ Master $master health check failed" -ForegroundColor Red
+                Write-Host "✗ Control plane node $controlPlaneNode health check failed" -ForegroundColor Red
             }
         }
     }
@@ -259,8 +259,8 @@ if (Test-Path $kubeconfigPath) {
     Write-Host "Backing up current kubeconfig to $backupPath" -ForegroundColor Yellow
     Copy-Item $kubeconfigPath $backupPath
     
-    Write-Host "Fetching updated kubeconfig from master..." -ForegroundColor Yellow
-    Copy-FileFromNode -Config $Config -Node $Config.MasterIPs[0] -RemotePath "/etc/rancher/k3s/k3s.yaml" -LocalPath "$kubeconfigPath.new"
+    Write-Host "Fetching updated kubeconfig from control plane node..." -ForegroundColor Yellow
+    Copy-FileFromNode -Config $Config -Node $Config.ControlPlaneIPs[0] -RemotePath "/etc/rancher/k3s/k3s.yaml" -LocalPath "$kubeconfigPath.new"
     
     # Update server URL to use proxy
     $content = Get-Content "$kubeconfigPath.new" -Raw

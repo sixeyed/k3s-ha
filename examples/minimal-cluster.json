@@ -5,7 +5,7 @@
   },
   "network": {
     "proxyIP": "10.0.1.100",
-    "masterIPs": [
+    "controlPlaneIPs": [
       "10.0.1.10"
     ],
     "workerIPs": [
@@ -22,7 +22,8 @@
   },
   "storage": {
     "device": "/dev/sdb",
-    "nfsMountPath": "/data/nfs"
+    "nfsMountPath": "/data/nfs",
+    "nfsProvisionerPath": "/data/nfs/shared"
   },
   "ssh": {
     "user": "ubuntu",
@@ -30,6 +31,7 @@
   },
   "k3s": {
     "token": null,
+    "taintControlPlane": false,
     "disableServices": ["traefik"],
     "tlsSans": [],
     "extraArgs": {

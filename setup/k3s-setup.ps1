@@ -73,7 +73,7 @@ stream {
     
     upstream k3s_api {
         least_conn;
-        ###MASTER_SERVERS###
+        ###CONTROL_PLANE_SERVERS###
     }
     
     server {
@@ -177,7 +177,7 @@ echo "Nginx proxy setup complete!"
 '@
 
 #########################################
-# MASTER NODE SETUP SCRIPT
+# CONTROL PLANE NODE SETUP SCRIPT
 #########################################
 
 $ControlPlaneSetupScript = @'
@@ -334,8 +334,8 @@ function Deploy-NFSProvisioner {
     
     Write-Host "Deploying NFS provisioner via YAML..." -ForegroundColor Yellow
     
-    # Get primary master IP and NFS path from config
-    $nfsServer = $Config.MasterIPs[0] 
+    # Get primary control plane IP and NFS path from config
+    $nfsServer = $Config.ControlPlaneIPs[0] 
     $nfsPath = $Config.NFSProvisionerPath
     
     Write-Host "  NFS Server: $nfsServer" -ForegroundColor Cyan
@@ -543,23 +543,23 @@ spec:
 Write-Host "=== K3s HA Cluster Deployment Script ===" -ForegroundColor Green
 Write-Host "Configuration:" -ForegroundColor Yellow
 Write-Host "  Proxy: $($Config.ProxyIP)" -ForegroundColor White
-Write-Host "  Masters: $($Config.MasterIPs -join ', ')" -ForegroundColor White
+Write-Host "  Control Plane: $($Config.ControlPlaneIPs -join ', ')" -ForegroundColor White
 Write-Host "  Workers: $($Config.WorkerIPs -join ', ')" -ForegroundColor White
 
 # Function to deploy scripts
 function Deploy-Scripts {
     Write-Host "`n=== Preparing deployment scripts ===" -ForegroundColor Cyan
     
-    # Generate master server lines for Nginx upstream
-    $masterServers = ""
-    foreach ($masterIP in $Config.MasterIPs) {
-        $masterServers += "        server ${masterIP}:6443 max_fails=3 fail_timeout=5s;`n"
+    # Generate control plane server lines for Nginx upstream
+    $controlPlaneServers = ""
+    foreach ($controlPlaneIP in $Config.ControlPlaneIPs) {
+        $controlPlaneServers += "        server ${controlPlaneIP}:6443 max_fails=3 fail_timeout=5s;`n"
     }
-    $masterServers = $masterServers.TrimEnd("`n")
+    $controlPlaneServers = $controlPlaneServers.TrimEnd("`n")
     
     # Prepare Nginx config with actual IPs
     $networkSubnet = Get-NetworkSubnet -IPAddress $Config.ProxyIP
-    $NginxConfigFinal = $NginxConfig -replace '###MASTER_SERVERS###', $masterServers
+    $NginxConfigFinal = $NginxConfig -replace '###CONTROL_PLANE_SERVERS###', $controlPlaneServers
     $NginxConfigFinal = $NginxConfigFinal -replace 'NETWORK_SUBNET', $networkSubnet
     
     # Prepare proxy setup script
@@ -613,15 +613,15 @@ function Setup-ProxyNode {
 function Setup-ControlPlaneNodes {
     Write-Host "`n=== Setting up Control Plane Nodes ===" -ForegroundColor Green
     
-    for ($i = 0; $i -lt $Config.MasterIPs.Count; $i++) {
-        $masterIP = $Config.MasterIPs[$i]
+    for ($i = 0; $i -lt $Config.ControlPlaneIPs.Count; $i++) {
+        $controlPlaneIP = $Config.ControlPlaneIPs[$i]
         $nodeNumber = $i + 1
         $isFirstServer = $i -eq 0
         
-        Write-Host "`nSetting up Control Plane Node $nodeNumber ($masterIP)..." -ForegroundColor Yellow
+        Write-Host "`nSetting up Control Plane Node $nodeNumber ($controlPlaneIP)..." -ForegroundColor Yellow
         
         # Generate K3s server arguments using the module function
-        $k3sServerArgs = Get-K3sServerArgs -Config $Config -IsFirstServer:$isFirstServer -NodeIP $masterIP
+        $k3sServerArgs = Get-K3sServerArgs -Config $Config -IsFirstServer:$isFirstServer -NodeIP $controlPlaneIP
         if (-not $isFirstServer) {
             # Remove cluster-init for additional servers (it's handled in the script)
             $k3sServerArgs = $k3sServerArgs -replace "--cluster-init\s*", ""
@@ -630,17 +630,17 @@ function Setup-ControlPlaneNodes {
         Write-Host "  K3s server arguments: $k3sServerArgs" -ForegroundColor Cyan
         
         # Copy setup script
-        Copy-FileToNode -Config $Config -Node $masterIP -LocalPath "$PSScriptRoot/config/setup-control-plane.sh" -RemotePath "/tmp/setup-control-plane.sh"
+        Copy-FileToNode -Config $Config -Node $controlPlaneIP -LocalPath "$PSScriptRoot/config/setup-control-plane.sh" -RemotePath "/tmp/setup-control-plane.sh"
         
         # Execute setup script in two steps to avoid complex quoting issues
         $chmodCmd = "chmod +x /tmp/setup-control-plane.sh"
-        Invoke-SSHCommand -Config $Config -Node $masterIP -Command $chmodCmd
+        Invoke-SSHCommand -Config $Config -Node $controlPlaneIP -Command $chmodCmd
         
-        $networkSubnet = Get-NetworkSubnet -IPAddress $Config.MasterIPs[0]
-        $setupCmd = "sudo /tmp/setup-control-plane.sh $nodeNumber $($Config.MasterIPs[0]) $($Config.K3sToken) $($Config.K3sVersion) $($Config.StorageDevice) $($Config.NFSMountPath) '$k3sServerArgs' '$networkSubnet'"
-        Invoke-SSHCommand -Config $Config -Node $masterIP -Command $setupCmd
+        $networkSubnet = Get-NetworkSubnet -IPAddress $Config.ControlPlaneIPs[0]
+        $setupCmd = "sudo /tmp/setup-control-plane.sh $nodeNumber $($Config.ControlPlaneIPs[0]) $($Config.K3sToken) $($Config.K3sVersion) $($Config.StorageDevice) $($Config.NFSMountPath) '$k3sServerArgs' '$networkSubnet'"
+        Invoke-SSHCommand -Config $Config -Node $controlPlaneIP -Command $setupCmd
         
-        # Wait for this master to be ready before proceeding to the next one
+        # Wait for this control plane node to be ready before proceeding to the next one
         Write-Host "  Waiting for Control Plane Node $nodeNumber to be ready..." -ForegroundColor Cyan
         $timeout = 120  # 2 minutes timeout
         $elapsed = 0
@@ -651,7 +651,7 @@ function Setup-ControlPlaneNodes {
             $elapsed += 10
             
             # Check if K3s service is running
-            $serviceStatus = Invoke-SSHCommand -Config $Config -Node $masterIP -Command "systemctl is-active k3s"
+            $serviceStatus = Invoke-SSHCommand -Config $Config -Node $controlPlaneIP -Command "systemctl is-active k3s"
             if ($serviceStatus -eq "active") {
                 Write-Host "  ✓ Control Plane Node $nodeNumber is ready!" -ForegroundColor Green
                 $ready = $true
@@ -714,7 +714,7 @@ function Configure-Cluster {
     Write-Host "Waiting for cluster to be ready..." -ForegroundColor Yellow
     Start-Sleep -Seconds 30
     
-    # Get kubeconfig from first master with retry logic
+    # Get kubeconfig from first control plane node with retry logic
     $kubeconfigPath = Join-Path $HOME ".kube" "k3s-config"
     New-Item -ItemType Directory -Force -Path (Join-Path $HOME ".kube") | Out-Null
     
@@ -732,7 +732,7 @@ function Configure-Cluster {
     
     while ($retryCount -lt $maxRetries -and -not $success) {
         try {
-            Copy-FileFromNode -Config $Config -Node $Config.MasterIPs[0] -RemotePath "/etc/rancher/k3s/k3s.yaml" -LocalPath $kubeconfigPath
+            Copy-FileFromNode -Config $Config -Node $Config.ControlPlaneIPs[0] -RemotePath "/etc/rancher/k3s/k3s.yaml" -LocalPath $kubeconfigPath
             
             # Verify the kubeconfig was retrieved successfully
             if (Test-Path $kubeconfigPath) {
@@ -907,11 +907,11 @@ function Configure-Cluster {
 function Import-KubeConfig {
     Write-Host "`n=== Importing Kubeconfig ===" -ForegroundColor Green
     
-    # Get kubeconfig from first master with retry logic
+    # Get kubeconfig from first control plane node with retry logic
     $kubeconfigPath = Join-Path $HOME ".kube" "k3s-config"
     New-Item -ItemType Directory -Force -Path (Join-Path $HOME ".kube") | Out-Null
     
-    Write-Host "Retrieving kubeconfig from master..." -ForegroundColor Yellow
+    Write-Host "Retrieving kubeconfig from control plane node..." -ForegroundColor Yellow
     
     # Always remove existing kubeconfig to force fresh retrieval
     if (Test-Path $kubeconfigPath) {
@@ -925,7 +925,7 @@ function Import-KubeConfig {
     
     while ($retryCount -lt $maxRetries -and -not $success) {
         try {
-            Copy-FileFromNode -Config $Config -Node $Config.MasterIPs[0] -RemotePath "/etc/rancher/k3s/k3s.yaml" -LocalPath $kubeconfigPath
+            Copy-FileFromNode -Config $Config -Node $Config.ControlPlaneIPs[0] -RemotePath "/etc/rancher/k3s/k3s.yaml" -LocalPath $kubeconfigPath
             
             # Verify the kubeconfig was retrieved successfully
             if (Test-Path $kubeconfigPath) {
@@ -1178,9 +1178,9 @@ Proxy Status Page:
   http://$($Config.ProxyIP)/
 
 NFS Exports Available:
-  - $($Config.MasterIPs[0]):/data/nfs/shared
-  - $($Config.MasterIPs[0]):/data/nfs/data
-  - $($Config.MasterIPs[0]):/data/nfs/backups
+  - $($Config.ControlPlaneIPs[0]):/data/nfs/shared
+  - $($Config.ControlPlaneIPs[0]):/data/nfs/data
+  - $($Config.ControlPlaneIPs[0]):/data/nfs/backups
 
 Storage Classes:
   - nfs-client (dynamic provisioning, delete)

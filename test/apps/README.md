@@ -60,7 +60,7 @@ Each app has its own PowerShell deployment script:
 ```
 
 ### All Apps at Once
-Use the master script to deploy and test all apps:
+Use the main script to deploy and test all apps:
 
 ```powershell
 # Full deployment and testing
@@ -145,7 +145,7 @@ kubectl describe pvc <pvc-name> -n demo-apps
 
 **NFS mount failures:**
 ```bash
-# Check NFS server on master node
+# Check NFS server on control plane node
 ssh vagrant@192.168.56.10 "showmount -e localhost"
 # Verify NFS provisioner is running
 kubectl get pods -n nfs-provisioner

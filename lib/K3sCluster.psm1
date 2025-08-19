@@ -37,16 +37,19 @@ function Load-ClusterConfig {
             $k3sToken = "k3s-ha-token-$(Get-Random -Maximum 999999)"
         }
         
+        # Get control plane IPs
+        $controlPlaneIPs = $jsonContent.network.controlPlaneIPs
+        
         # Build TLS SANs if not provided
         $tlsSans = $jsonContent.k3s.tlsSans
         if ($tlsSans.Count -eq 0) {
-            $tlsSans = @($jsonContent.network.proxyIP) + $jsonContent.network.masterIPs
+            $tlsSans = @($jsonContent.network.proxyIP) + $controlPlaneIPs
         }
         
         return @{
             # Network configuration
             ProxyIP = $jsonContent.network.proxyIP
-            MasterIPs = $jsonContent.network.masterIPs
+            ControlPlaneIPs = $controlPlaneIPs
             WorkerIPs = $jsonContent.network.workerIPs
             
             # Cluster configuration
@@ -107,9 +110,9 @@ function Get-SSHKeyForNode {
     $fullKeyName = Split-Path -Leaf $baseKeyPath
     
     # Extract the base key name by removing any existing role suffix
-    # For example: vagrant_rsa_k3s-master-1 -> vagrant_rsa
+    # For example: vagrant_rsa_k3s-control-plane-1 -> vagrant_rsa
     $baseKeyName = $fullKeyName
-    if ($fullKeyName -match "^(.+)_k3s-(master|worker|proxy)(-\d+)?$") {
+    if ($fullKeyName -match "^(.+)_k3s-(control-plane|worker|proxy)(-\d+)?$") {
         $baseKeyName = $matches[1]
     }
     
@@ -119,9 +122,9 @@ function Get-SSHKeyForNode {
     # Add role-based keys
     if ($Node -eq $Config.ProxyIP) {
         $keysToTry += Join-Path $keyDir "${baseKeyName}_k3s-proxy"
-    } elseif ($Config.MasterIPs -contains $Node) {
-        $masterIndex = $Config.MasterIPs.IndexOf($Node) + 1
-        $keysToTry += Join-Path $keyDir "${baseKeyName}_k3s-master-$masterIndex"
+    } elseif ($Config.ControlPlaneIPs -contains $Node) {
+        $controlPlaneIndex = $Config.ControlPlaneIPs.IndexOf($Node) + 1
+        $keysToTry += Join-Path $keyDir "${baseKeyName}_k3s-control-plane-$controlPlaneIndex"
     } elseif ($Config.WorkerIPs -contains $Node) {
         $workerIndex = $Config.WorkerIPs.IndexOf($Node) + 1
         $keysToTry += Join-Path $keyDir "${baseKeyName}_k3s-worker-$workerIndex"
@@ -140,9 +143,9 @@ function Get-SSHKeyForNode {
             $machineName = $null
             if ($Node -eq $Config.ProxyIP) {
                 $machineName = "k3s-proxy"
-            } elseif ($Config.MasterIPs -contains $Node) {
-                $masterIndex = $Config.MasterIPs.IndexOf($Node) + 1
-                $machineName = "k3s-master-$masterIndex"
+            } elseif ($Config.ControlPlaneIPs -contains $Node) {
+                $controlPlaneIndex = $Config.ControlPlaneIPs.IndexOf($Node) + 1
+                $machineName = "k3s-control-plane-$controlPlaneIndex"
             } elseif ($Config.WorkerIPs -contains $Node) {
                 $workerIndex = $Config.WorkerIPs.IndexOf($Node) + 1
                 $machineName = "k3s-worker-$workerIndex"
@@ -248,7 +251,7 @@ function Get-K3sServerArgs {
     
     $args = @()
     
-    # Node IP binding (essential for multi-master HA)
+    # Node IP binding (essential for multi-control-plane HA)
     if ($NodeIP) {
         $args += "--node-ip=$NodeIP"
         $args += "--node-external-ip=$NodeIP"
@@ -276,7 +279,7 @@ function Get-K3sServerArgs {
         $args += "--kubelet-arg=max-pods=$($Config.MaxPods)"
     }
     
-    # TLS SANs - automatically include proxy IP and master IPs
+    # TLS SANs - automatically include proxy IP and control plane IPs
     $tlsSans = @()
     
     # Add proxy IP if it exists
@@ -284,9 +287,9 @@ function Get-K3sServerArgs {
         $tlsSans += $Config.ProxyIP
     }
     
-    # Add master IPs
-    if ($Config.MasterIPs) {
-        $tlsSans += $Config.MasterIPs
+    # Add control plane node IPs
+    if ($Config.ControlPlaneIPs) {
+        $tlsSans += $Config.ControlPlaneIPs
     }
     
     # Add custom TLS SANs from config

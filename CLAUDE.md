@@ -154,7 +154,7 @@ ssh ubuntu@10.0.1.10 "showmount -e localhost"
   - `K3sCluster.psm1` - Centralized cluster management functions with SSH automation
 
 - **test/** - Testing environments and demo applications
-  - **clusters/vagrant/minimal/** - Minimal test environment (3 VMs: proxy + master + worker)
+  - **clusters/vagrant/minimal/** - Minimal test environment (3 VMs: proxy + control plane + worker)
     - `Vagrantfile` - VirtualBox/VMware VM configuration with ARM64 support
     - `vagrant-cluster.json` - Vagrant-specific configuration
     - `vagrant-setup.ps1` - Vagrant VM management script
@@ -181,7 +181,7 @@ All configuration is centralized in JSON files, with `cluster.json` as the defau
   },
   "network": {
     "proxyIP": "10.0.1.100",
-    "masterIPs": ["10.0.1.10", "10.0.1.11", "10.0.1.12"],
+    "controlPlaneIPs": ["10.0.1.10", "10.0.1.11", "10.0.1.12"],
     "workerIPs": ["10.0.1.20", "10.0.1.21", "10.0.1.22", "10.0.1.23", "10.0.1.24", "10.0.1.25"]
   },
   "kubernetes": {
@@ -241,7 +241,7 @@ All configuration is centralized in JSON files, with `cluster.json` as the defau
 ## Storage Architecture
 
 The cluster provides two storage options:
-- **NFS Dynamic Provisioning** - Via YAML-based provisioner running on masters with storage classes:
+- **NFS Dynamic Provisioning** - Via YAML-based provisioner running on control plane nodes with storage classes:
   - `nfs-client` - Dynamic provisioning with delete reclaim policy (data deleted when PVC removed)
   - `nfs-client-retain` - Dynamic provisioning with retain reclaim policy (data preserved when PVC removed)
 - **Local Storage** - For high-performance workloads using local-path provisioner (default)
@@ -336,8 +336,8 @@ cd ../test/apps
 kubectl get pods -n nfs-provisioner
 kubectl logs -n nfs-provisioner deployment/nfs-client-provisioner
 
-# Verify NFS exports on master
-vagrant ssh k3s-master-1 -c "showmount -e localhost"
+# Verify NFS exports on control plane node
+vagrant ssh k3s-control-plane-1 -c "showmount -e localhost"
 
 # Test NFS mount manually
 kubectl create -f - <<EOF
@@ -361,7 +361,7 @@ kubectl delete pvc test-nfs
 
 ### Common Issues and Solutions
 1. **NFS provisioner CrashLoopBackOff**: 
-   - Check NFS exports: `showmount -e <master-ip>`
+   - Check NFS exports: `showmount -e <control-plane-ip>`
    - Verify NFS directories exist and have correct permissions
    - Ensure YAML deployment includes host networking
 
@@ -379,15 +379,15 @@ kubectl delete pvc test-nfs
 - **VirtualBox 7.1+** (ARM64 support) or **VMware Workstation/Fusion**
 - **Vagrant 2.3+** with VM provider plugins
 - **PowerShell 7+** (cross-platform, includes Windows PowerShell 5.1+)
-- **8GB+ RAM** available for VMs (1GB proxy + 2GB master + 1GB worker + host overhead)
+- **8GB+ RAM** available for VMs (1GB proxy + 2GB control plane + 1GB worker + host overhead)
 - **20GB+ disk space** for VM storage and container images
 
 ### For Production/Remote Deployment  
 - **PowerShell 5.1+** on deployment machine (Windows, Linux, or macOS)
-- **Ubuntu VMs** (20.04/22.04 LTS recommended) - Minimum 3 VMs (1 proxy + 1 master + 1 worker)
+- **Ubuntu VMs** (20.04/22.04 LTS recommended) - Minimum 3 VMs (1 proxy + 1 control plane + 1 worker)
 - **SSH key authentication** configured for all nodes (no password authentication)
 - **Network connectivity** between all nodes on same subnet
-- **Storage devices** on master nodes for NFS (optional if using existing storage)
+- **Storage devices** on control plane nodes for NFS (optional if using existing storage)
 - **Static IP addresses** for all nodes (DHCP reservations acceptable)
 
 ## Security Features

@@ -13,7 +13,7 @@ This guide covers the deployment and usage of a highly available K3s cluster wit
 ### Required Resources
 - **10 VMs total** with the following specifications:
   - **Proxy VM**: 2 vCPU, 4 GB RAM, 20 GB storage
-  - **Master VMs (3)**: 8 vCPU, 32 GB RAM, 150 GB OS + 1 TB storage disk
+  - **Control Plane VMs (3)**: 8 vCPU, 32 GB RAM, 150 GB OS + 1 TB storage disk
   - **Worker VMs (6)**: 8-16 vCPU, 32-64 GB RAM, 200 GB storage
 
 ### Network Requirements
@@ -56,7 +56,7 @@ Edit the `cluster.json` file in the repository root to match your environment:
   },
   "network": {
     "proxyIP": "10.0.1.100",
-    "masterIPs": [
+    "controlPlaneIPs": [
       "10.0.1.10",
       "10.0.1.11", 
       "10.0.1.12"
@@ -94,7 +94,7 @@ Edit the `cluster.json` file in the repository root to match your environment:
 **Configuration Notes:**
 - Update all IP addresses to match your environment
 - The `token` field can be left null (will be auto-generated)
-- The `tlsSans` array will auto-populate with proxy and master IPs if left empty
+- The `tlsSans` array will auto-populate with proxy and control plane IPs if left empty
 - Modify `disableServices` to exclude unwanted K3s components
 - Set appropriate timeout and retention values for your environment
 
@@ -145,7 +145,7 @@ Select option (1-6): 1
 This will:
 1. Generate all configuration files
 2. Setup the Nginx proxy
-3. Install K3s on all master nodes with NFS
+3. Install K3s on all control plane nodes with NFS
 4. Install K3s on all worker nodes
 5. Configure NFS storage provisioner
 6. Verify the cluster
@@ -162,7 +162,7 @@ Select option (1-6): 2
 # Review generated files:
 # - nginx.conf
 # - setup-proxy.sh
-# - setup-master.sh
+# - setup-control plane.sh
 # - setup-worker.sh
 # - nfs-provisioner.yaml
 
@@ -170,7 +170,7 @@ Select option (1-6): 2
 .\k3s-complete-setup.ps1
 Select option (1-6): 3
 
-# Step 3: Deploy masters (wait for completion)
+# Step 3: Deploy control planes (wait for completion)
 .\k3s-complete-setup.ps1
 Select option (1-6): 4
 
@@ -192,9 +192,9 @@ If you prefer to deploy manually:
 scp setup-proxy.sh ubuntu@10.0.1.100:/tmp/
 ssh ubuntu@10.0.1.100 "chmod +x /tmp/setup-proxy.sh && sudo /tmp/setup-proxy.sh"
 
-# On each master (adjust parameters)
-scp setup-master.sh ubuntu@10.0.1.10:/tmp/
-ssh ubuntu@10.0.1.10 "chmod +x /tmp/setup-master.sh && sudo /tmp/setup-master.sh 1 10.0.1.10 <token> v1.31.1+k3s1 /dev/sdb /data/nfs"
+# On each control plane (adjust parameters)
+scp setup-control plane.sh ubuntu@10.0.1.10:/tmp/
+ssh ubuntu@10.0.1.10 "chmod +x /tmp/setup-control plane.sh && sudo /tmp/setup-control plane.sh 1 10.0.1.10 <token> v1.31.1+k3s1 /dev/sdb /data/nfs"
 
 # On each worker
 scp setup-worker.sh ubuntu@10.0.1.20:/tmp/
@@ -258,7 +258,7 @@ Start-Process "http://10.0.1.100/"
 # Check Nginx logs on proxy
 ssh ubuntu@10.0.1.100 "sudo tail -f /var/log/nginx/k3s-access.log"
 
-# Check K3s logs on masters
+# Check K3s logs on control planes
 ssh ubuntu@10.0.1.10 "sudo journalctl -u k3s -f"
 ```
 
@@ -327,7 +327,7 @@ spec:
 ### NFS Direct Access
 
 For applications requiring direct NFS access:
-- Server: Any master IP (10.0.1.10, 10.0.1.11, or 10.0.1.12)
+- Server: Any control plane IP (10.0.1.10, 10.0.1.11, or 10.0.1.12)
 - Exports:
   - `/data/nfs/shared` - General shared storage
   - `/data/nfs/data` - Application data
@@ -344,8 +344,8 @@ For applications requiring direct NFS access:
 # Or specify custom configuration file
 .\operations\k3s-add-node.ps1 -NodeType worker -NewNodeIP "10.0.1.26" -ConfigFile "production-cluster.json"
 
-# Add new master node
-.\operations\k3s-add-node.ps1 -NodeType master -NewNodeIP "10.0.1.13"
+# Add new control plane node
+.\operations\k3s-add-node.ps1 -NodeType control plane -NewNodeIP "10.0.1.13"
 ```
 
 ### Updating Nginx Proxy Configuration
@@ -365,7 +365,7 @@ sudo nginx -s reload
 ### Backing Up Cluster Data
 
 ```powershell
-# Backup etcd (on any master)
+# Backup etcd (on any control plane)
 ssh ubuntu@10.0.1.10 "sudo k3s etcd-snapshot save --name backup-$(date +%Y%m%d)"
 
 # Backup NFS data
@@ -399,7 +399,7 @@ ssh ubuntu@10.0.1.10 "sudo tar -czf /data/nfs/backups/nfs-backup-$(date +%Y%m%d)
    # Check provisioner logs
    kubectl logs -n nfs-provisioner deployment/nfs-client-provisioner
    
-   # Verify NFS exports on masters
+   # Verify NFS exports on control planes
    showmount -e 10.0.1.10
    ```
 
@@ -461,7 +461,7 @@ Invoke-Expression $healthCheck
 
 ### NFS Performance
 - Use dedicated network for storage traffic if possible
-- Monitor NFS server load on masters
+- Monitor NFS server load on control planes
 - Consider SSD storage for better performance
 
 ### K3s Optimization

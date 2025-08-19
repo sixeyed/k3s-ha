@@ -1,9 +1,9 @@
 # K3s Add Node to Cluster Script
-# Supports adding both master and worker nodes to existing cluster
+# Supports adding both control plane and worker nodes to existing cluster
 
 param(
     [Parameter(Mandatory=$true)]
-    [ValidateSet("master", "worker")]
+    [ValidateSet("control-plane", "worker")]
     [string]$NodeType,
     
     [Parameter(Mandatory=$true)]
@@ -33,35 +33,35 @@ $Config = Load-ClusterConfig -ConfigPath $ConfigFile
 # Get cluster information
 Write-Host "`nGathering cluster information..." -ForegroundColor Cyan
 
-# Get K3s token from first master
-$existingMasterIP = $Config.MasterIPs[0]
-$k3sToken = Invoke-SSHCommand -Config $Config -Node $existingMasterIP -Command "sudo cat /var/lib/rancher/k3s/server/node-token"
+# Get K3s token from first control plane node
+$existingControlPlaneIP = $Config.ControlPlaneIPs[0]
+$k3sToken = Invoke-SSHCommand -Config $Config -Node $existingControlPlaneIP -Command "sudo cat /var/lib/rancher/k3s/server/node-token"
 if ([string]::IsNullOrEmpty($k3sToken)) {
-    Write-Host "Error: Could not retrieve K3s token from master" -ForegroundColor Red
+    Write-Host "Error: Could not retrieve K3s token from control plane node" -ForegroundColor Red
     exit 1
 }
 
 # Get K3s version from config (or detect from cluster)
 $k3sVersion = $Config.K3sVersion
 if ([string]::IsNullOrEmpty($k3sVersion)) {
-    $k3sVersion = Invoke-SSHCommand -Config $Config -Node $existingMasterIP -Command "k3s --version | grep -oP 'k3s version \K[^\s]+'"
+    $k3sVersion = Invoke-SSHCommand -Config $Config -Node $existingControlPlaneIP -Command "k3s --version | grep -oP 'k3s version \K[^\s]+'"
 }
 Write-Host "Using K3s version: $k3sVersion" -ForegroundColor Green
 
 # Create setup script based on node type
-if ($NodeType -eq "master") {
-    Write-Host "`nPreparing master node setup..." -ForegroundColor Cyan
+if ($NodeType -eq "control-plane") {
+    Write-Host "`nPreparing control plane node setup..." -ForegroundColor Cyan
     
-    # Get current master count
+    # Get current control plane count
     $env:KUBECONFIG = "$HOME\.kube\k3s-config"
-    $masterCount = (kubectl get nodes -l node-role.kubernetes.io/master=true --no-headers | Measure-Object).Count + 1
+    $controlPlaneCount = (kubectl get nodes -l node-role.kubernetes.io/control-plane=true --no-headers | Measure-Object).Count + 1
     
     # Update Nginx proxy configuration
     Write-Host "Updating Nginx proxy configuration..." -ForegroundColor Yellow
     
     $nginxUpdateScript = @"
 #!/bin/bash
-# Add new master to Nginx upstream
+# Add new control plane node to Nginx upstream
 
 # Backup current config
 sudo cp /etc/nginx/nginx.conf /etc/nginx/nginx.conf.bak.\$(date +%Y%m%d_%H%M%S)
@@ -86,12 +86,12 @@ fi
     Copy-FileToNode -Config $Config -Node $ProxyIP -LocalPath "update-nginx.sh" -RemotePath "/tmp/update-nginx.sh"
     Invoke-SSHCommand -Config $Config -Node $ProxyIP -Command "chmod +x /tmp/update-nginx.sh && /tmp/update-nginx.sh"
     
-    # Create master setup script
-    $masterSetupScript = @"
+    # Create control plane setup script
+    $controlPlaneSetupScript = @"
 #!/bin/bash
-# Add new master node to K3s cluster
+# Add new control plane node to K3s cluster
 
-echo "Setting up new K3s master node"
+echo "Setting up new K3s control plane node"
 
 # Update system
 apt-get update
@@ -143,19 +143,19 @@ systemctl restart nfs-kernel-server
 exportfs -ra
 
 # Install K3s
-echo "Installing K3s master (this may take a few minutes)..."
+echo "Installing K3s control plane node (this may take a few minutes)..."
 curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION=$k3sVersion sh -s - server \
-    --server https://$ExistingMasterIP:6443 \
+    --server https://$ExistingControlPlaneIP:6443 \
     --token=$k3sToken \
     --tls-san=$ProxyIP \
     --tls-san=$NewNodeIP \
     --disable=traefik \
     --write-kubeconfig-mode=644
 
-echo "New master node setup complete!"
+echo "New control plane node setup complete!"
 "@
     
-    $setupScriptPath = "setup-new-master.sh"
+    $setupScriptPath = "setup-new-control-plane.sh"
     
 } else {
     Write-Host "`nPreparing worker node setup..." -ForegroundColor Cyan
@@ -200,8 +200,8 @@ echo "New worker node setup complete!"
 }
 
 # Save and deploy setup script
-if ($NodeType -eq "master") {
-    $masterSetupScript | Out-File -FilePath $setupScriptPath -Encoding UTF8
+if ($NodeType -eq "control-plane") {
+    $controlPlaneSetupScript | Out-File -FilePath $setupScriptPath -Encoding UTF8
 } else {
     $workerSetupScript | Out-File -FilePath $setupScriptPath -Encoding UTF8
 }
@@ -226,9 +226,9 @@ kubectl get nodes | Select-String $NewNodeIP
 if ($LASTEXITCODE -eq 0) {
     Write-Host "`n✓ Node successfully added to cluster!" -ForegroundColor Green
     
-    # Label master nodes
-    if ($NodeType -eq "master") {
-        Write-Host "Applying master labels..." -ForegroundColor Yellow
+    # Label control plane nodes
+    if ($NodeType -eq "control-plane") {
+        Write-Host "Applying control plane labels..." -ForegroundColor Yellow
         kubectl label node $NewNodeIP node-role.kubernetes.io/master=true --overwrite
         kubectl label node $NewNodeIP node-role.kubernetes.io/control-plane=true --overwrite
     }
@@ -249,9 +249,9 @@ Remove-Item -Path $setupScriptPath, "update-nginx.sh" -ErrorAction SilentlyConti
 Write-Host "`n=== Post-Addition Tasks ===" -ForegroundColor Green
 Write-Host @"
 
-For Master Nodes:
-1. Update monitoring to include new master
-2. Update backup scripts to include new master's etcd
+For Control Plane Nodes:
+1. Update monitoring to include new control plane node
+2. Update backup scripts to include new control plane node's etcd
 3. Test NFS exports: showmount -e $NewNodeIP
 4. Update documentation with new topology
 

@@ -48,7 +48,7 @@ if ($LASTEXITCODE -ne 0) {
 Write-Host "`nCurrent cluster status:" -ForegroundColor Yellow
 kubectl get nodes -o wide
 
-$currentVersion = Invoke-SSHCommand -Config $Config -Node $Config.MasterIPs[0] -Command "k3s --version | grep -oP 'k3s version \K[^\s]+'"
+$currentVersion = Invoke-SSHCommand -Config $Config -Node $Config.ControlPlaneIPs[0] -Command "k3s --version | grep -oP 'k3s version \K[^\s]+'"
 Write-Host "`nCurrent K3s version: $currentVersion" -ForegroundColor Cyan
 Write-Host "Target K3s version: $NewK3sVersion" -ForegroundColor Cyan
 
@@ -57,18 +57,18 @@ if (-not $SkipBackup -and -not $DryRun) {
     Write-Host "`n=== Backing up etcd ===" -ForegroundColor Green
     $backupDate = Get-Date -Format "yyyyMMdd_HHmmss"
     
-    foreach ($master in $MasterIPs) {
-        Write-Host "Backing up etcd on $master..." -ForegroundColor Yellow
+    foreach ($controlPlaneNode in $Config.ControlPlaneIPs) {
+        Write-Host "Backing up etcd on $controlPlaneNode..." -ForegroundColor Yellow
         $backupCmd = "sudo k3s etcd-snapshot save --name pre-upgrade-$backupDate"
-        Invoke-SSHCommand -Config $Config -Node $master -Command $backupCmd
+        Invoke-SSHCommand -Config $Config -Node $controlPlaneNode -Command $backupCmd
         
         # Verify backup
         $verifyCmd = "sudo k3s etcd-snapshot list | grep pre-upgrade-$backupDate"
-        $backupVerify = Invoke-SSHCommand -Config $Config -Node $master -Command $verifyCmd
+        $backupVerify = Invoke-SSHCommand -Config $Config -Node $controlPlaneNode -Command $verifyCmd
         if ($backupVerify) {
-            Write-Host "✓ Backup successful on $master" -ForegroundColor Green
+            Write-Host "✓ Backup successful on $controlPlaneNode" -ForegroundColor Green
         } else {
-            Write-Host "✗ Backup failed on $master" -ForegroundColor Red
+            Write-Host "✗ Backup failed on $controlPlaneNode" -ForegroundColor Red
             exit 1
         }
     }
@@ -144,7 +144,7 @@ function Upgrade-Node {
     if (-not $DryRun) {
         scp -i $SSHKeyPath -o StrictHostKeyChecking=no "k3s-upgrade-node.sh" ${SSHUser}@${NodeIP}:/tmp/
         
-        $nodeTypeParam = if ($NodeType -eq "master") { "server" } else { "agent" }
+        $nodeTypeParam = if ($NodeType -eq "control-plane") { "server" } else { "agent" }
         Invoke-SSHCommand -Config $Config -Node $NodeIP -Command "chmod +x /tmp/k3s-upgrade-node.sh && sudo /tmp/k3s-upgrade-node.sh $NewK3sVersion $nodeTypeParam"
     }
     
@@ -194,14 +194,14 @@ function Upgrade-Node {
 # Upgrade process
 Write-Host "`n=== Starting Upgrade Process ===" -ForegroundColor Green
 
-# Step 1: Upgrade masters one by one
-Write-Host "`n--- Upgrading Master Nodes ---" -ForegroundColor Cyan
-foreach ($master in $MasterIPs) {
+# Step 1: Upgrade control plane nodes one by one
+Write-Host "`n--- Upgrading Control Plane Nodes ---" -ForegroundColor Cyan
+foreach ($controlPlaneNode in $Config.ControlPlaneIPs) {
     $nodeName = kubectl get nodes -o json | ConvertFrom-Json | 
-        Where-Object { $_.status.addresses | Where-Object { $_.type -eq "InternalIP" -and $_.address -eq $master } } | 
+        Where-Object { $_.status.addresses | Where-Object { $_.type -eq "InternalIP" -and $_.address -eq $controlPlaneNode } } | 
         Select-Object -ExpandProperty metadata | Select-Object -ExpandProperty name
     
-    Upgrade-Node -NodeIP $master -NodeType "master" -NodeName $nodeName
+    Upgrade-Node -NodeIP $controlPlaneNode -NodeType "control-plane" -NodeName $nodeName
     
     if (-not $DryRun) {
         Write-Host "Waiting for cluster to stabilize..." -ForegroundColor Yellow
@@ -224,8 +224,8 @@ foreach ($master in $MasterIPs) {
 Write-Host "`n--- Upgrading Worker Nodes ---" -ForegroundColor Cyan
 $batchSize = 2  # Upgrade 2 workers at a time
 
-for ($i = 0; $i -lt $WorkerIPs.Count; $i += $batchSize) {
-    $batch = $WorkerIPs[$i..[Math]::Min($i + $batchSize - 1, $WorkerIPs.Count - 1)]
+for ($i = 0; $i -lt $Config.WorkerIPs.Count; $i += $batchSize) {
+    $batch = $Config.WorkerIPs[$i..[Math]::Min($i + $batchSize - 1, $Config.WorkerIPs.Count - 1)]
     Write-Host "`nUpgrading worker batch: $($batch -join ', ')" -ForegroundColor Yellow
     
     foreach ($worker in $batch) {
@@ -236,7 +236,7 @@ for ($i = 0; $i -lt $WorkerIPs.Count; $i += $batchSize) {
         Upgrade-Node -NodeIP $worker -NodeType "worker" -NodeName $nodeName
     }
     
-    if (-not $DryRun -and $i + $batchSize -lt $WorkerIPs.Count) {
+    if (-not $DryRun -and $i + $batchSize -lt $Config.WorkerIPs.Count) {
         Write-Host "Waiting before next batch..." -ForegroundColor Yellow
         Start-Sleep -Seconds 60
     }
@@ -250,7 +250,7 @@ if (-not $DryRun) {
     kubectl get nodes -o wide
     
     Write-Host "`nK3s versions:" -ForegroundColor Yellow
-    foreach ($node in ($MasterIPs + $WorkerIPs)) {
+    foreach ($node in ($Config.ControlPlaneIPs + $Config.WorkerIPs)) {
         $version = Invoke-SSHCommand -Config $Config -Node $node -Command "k3s --version 2>&1 | head -1"
         Write-Host "$node : $version" -ForegroundColor White
     }
@@ -291,7 +291,7 @@ Post-Upgrade Checklist:
 
 Rollback Instructions:
 If you need to rollback, use the etcd snapshots created:
-  - Snapshots are stored on each master in /var/lib/rancher/k3s/server/db/snapshots/
+  - Snapshots are stored on each control plane node in /var/lib/rancher/k3s/server/db/snapshots/
   - Restore with: k3s server --cluster-reset --etcd-restore=<snapshot-name>
 
 "@ -ForegroundColor Cyan

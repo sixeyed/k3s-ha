@@ -220,7 +220,7 @@ function Show-ClusterStatus {
             if ($clusterConfig) {
                 $config = Get-Content $clusterConfig | ConvertFrom-Json
                 Write-Host "Proxy:   $($config.network.proxyIP)" -ForegroundColor Cyan
-                Write-Host "Masters: $($config.network.masterIPs -join ', ')" -ForegroundColor Cyan
+                Write-Host "Control Plane: $($config.network.controlPlaneIPs -join ', ')" -ForegroundColor Cyan
                 Write-Host "Workers: $($config.network.workerIPs -join ', ')" -ForegroundColor Cyan
             }
         }
@@ -252,9 +252,9 @@ function Show-ClusterInfo {
             Write-Host "    " -ForegroundColor Green
             Write-Host "    VM Details:" -ForegroundColor Green
             Write-Host "    - Proxy:   $($config.network.proxyIP)" -ForegroundColor Green
-            foreach ($ip in $config.network.masterIPs) {
-                $index = $config.network.masterIPs.IndexOf($ip) + 1
-                Write-Host "    - Master$index`: $ip" -ForegroundColor Green
+            foreach ($ip in $config.network.controlPlaneIPs) {
+                $index = $config.network.controlPlaneIPs.IndexOf($ip) + 1
+                Write-Host "    - Control Plane $index`: $ip" -ForegroundColor Green
             }
             foreach ($ip in $config.network.workerIPs) {
                 $index = $config.network.workerIPs.IndexOf($ip) + 1

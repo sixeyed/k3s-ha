@@ -5,7 +5,7 @@
   },
   "network": {
     "proxyIP": "192.168.56.100",
-    "masterIPs": [
+    "controlPlaneIPs": [
       "192.168.56.10"
     ],
     "workerIPs": [
@@ -27,7 +27,7 @@
   },
   "ssh": {
     "user": "vagrant", 
-    "keyPath": "ssh_keys/vagrant_rsa_k3s-master-1"
+    "keyPath": "ssh_keys/vagrant_rsa_k3s-control-plane-1"
   },
   "k3s": {
     "token": "k3s-ha-token-887061",
